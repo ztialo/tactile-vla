@@ -18,6 +18,12 @@ from isaaclab.utils.math import (
     matrix_from_euler,
     quat_from_euler_xyz,
 )
+from .franka_scene_cfg import FrankaEnvCfg
+# ros2 
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped
+from sensor_msgs.msg import JointState
 
 
 class FrankaEnv(DirectRLEnv):
@@ -56,13 +62,20 @@ class FrankaEnv(DirectRLEnv):
         # )
         # self.randomizer_prim_list = None
 
+        # initialize ros2
+        try:
+            rclpy.init()
+        except:
+            print("[ERROR] ROS2 init failed")
+            pass
+            
+
     def _reset_idx(self, env_ids: Sequence[int]):
         super()._reset_idx(env_ids)
         # Reset the robot
         dof_pos = self.robot.data.default_joint_pos.clone()
         dof_vel = self.robot.data.default_joint_vel.clone()
         self.robot.write_joint_state_to_sim(dof_pos, dof_vel, env_ids=env_ids)
-
 
     def _set_up_diff_ik_controller(self) -> None:
         diff_ik_cfg = DifferentialIKControllerCfg(
@@ -72,9 +85,15 @@ class FrankaEnv(DirectRLEnv):
             diff_ik_cfg, num_envs=self.num_envs, device=self.device
         )
         self.arm_entity_cfg = SceneEntityCfg(
-            "franka", joint_names=["joint[1-6]"], body_names=["link[6]"]
+            "franka", joint_names=["fr3_joint[1-7]"], body_names=["fr3_link7"]
         )
         self.arm_entity_cfg.resolve(self.scene)
+
+    def read_cmds_ros(self) -> Dict[str, torch.Tensor]:
+        """
+        Read the ee pose and gripper command from ros node
+        """
+
 
     def compute_ik(
         self, target_poses: Dict[str, torch.Tensor]

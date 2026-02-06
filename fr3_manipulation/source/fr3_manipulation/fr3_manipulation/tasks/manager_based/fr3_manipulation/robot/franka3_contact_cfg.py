@@ -23,12 +23,12 @@ FRANKA_3_CFG = ArticulationCfg(
     init_state=ArticulationCfg.InitialStateCfg(
         joint_pos={
             "fr3_joint1": 0.0,
-            "fr3_joint2": -0.569,
+            "fr3_joint2": -0.785,
             "fr3_joint3": 0.0,
-            "fr3_joint4": -2.810,
+            "fr3_joint4": -2.356,
             "fr3_joint5": 0.0,
-            "fr3_joint6": 3.037,
-            "fr3_joint7": 0.741,
+            "fr3_joint6": 1.571,
+            "fr3_joint7": 0.785,
             "fr3_finger_joint.*": 0.04,
         },
     ),

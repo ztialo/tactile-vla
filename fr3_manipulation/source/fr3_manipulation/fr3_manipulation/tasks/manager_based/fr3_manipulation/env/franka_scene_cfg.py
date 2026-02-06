@@ -38,7 +38,7 @@ class FrankaSceneCfg(InteractiveSceneCfg):
 
     # Articulation
     franka = FRANKA_3_CFG.replace(prim_path="{ENV_REGEX_NS}/Franka_arm")
-    franka.init_state.pos = (0.0, 0.0, 0.0)
+    franka.init_state.pos = (0.0, 1.5, 1.0)
     # Cube
     # dice_cube = RigidObjectCfg(
     #     prim_path="{ENV_REGEX_NS}/Cube",
