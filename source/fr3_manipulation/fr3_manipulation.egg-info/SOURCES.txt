@@ -1,0 +1,10 @@
+pyproject.toml
+setup.py
+fr3_manipulation/__init__.py
+fr3_manipulation/ui_extension_example.py
+fr3_manipulation.egg-info/PKG-INFO
+fr3_manipulation.egg-info/SOURCES.txt
+fr3_manipulation.egg-info/dependency_links.txt
+fr3_manipulation.egg-info/not-zip-safe
+fr3_manipulation.egg-info/requires.txt
+fr3_manipulation.egg-info/top_level.txt

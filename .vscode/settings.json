@@ -1,6 +1,12 @@
 {
     "ROS2.distro": "jazzy",
+    "python.defaultInterpreterPath": "/home/zdli/miniconda3/envs/env_isaaclab/bin/python",
     "python.analysis.extraPaths": [
-        "/opt/ros/jazzy/lib/python3.12/site-packages"
+        "/opt/ros/jazzy/lib/python3.12/site-packages",
+        "/home/zdli/IsaacLab/source/isaaclab",
+        "/home/zdli/IsaacLab/source/isaaclab_assets",
+        "/home/zdli/IsaacLab/source/isaaclab_tasks",
+        "/home/zdli/IsaacLab/source/isaaclab_rl",
+        "/home/zdli/IsaacLab/source/isaaclab_mimic"
     ]
 }
