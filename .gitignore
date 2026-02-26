@@ -4,3 +4,20 @@
 .vscode/*
 !.vscode/c_cpp_properties.json
 !.vscode/settings.json
+
+# Training/runtime artifacts
+logs/
+outputs/
+
+# Model/checkpoint exports
+*.pt
+*.onnx
+events.out.tfevents.*
+
+# Python cache
+**/__pycache__/
+*.py[cod]
+
+logs/
+*.pt
+*.onnx

@@ -5,7 +5,8 @@ import os
 
 BASE_DIR = os.path.dirname(__file__)
 ASSET_DIR = os.path.join(BASE_DIR, "..", "assets")  
-FR3_USD_PATH = os.path.join(ASSET_DIR, "franka3.usd")
+FR3_USD_PATH = os.path.join(ASSET_DIR, "fr3_ft.usd")
+# FR3_USD_PATH = os.path.join(ASSET_DIR, "franka3.usd")
 
 FRANKA_3_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
