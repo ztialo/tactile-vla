@@ -36,6 +36,13 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument("--log", action="store_true", default=False, help="Log training information.")
+parser.add_argument(
+    "--action_smoothing_alpha",
+    type=float,
+    default=0.3,
+    help="Low-pass smoothing factor for actions in [0, 1]. 1.0 disables smoothing.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -114,6 +121,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
     log_dir = os.path.dirname(resume_path)
+    ft_log_dir = os.path.join("logs", "ft_sensor")
 
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
@@ -128,7 +136,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # wrap for video recording
     if args_cli.video:
         video_kwargs = {
-            "video_folder": os.path.join(log_dir, "videos", "play"),
+            "video_folder": os.path.join(ft_log_dir, "videos", datetime.now().strftime("%Y%m%d_%H%M%S")),
             "step_trigger": lambda step: step == 0,
             "video_length": args_cli.video_length,
             "disable_logger": True,
@@ -197,10 +205,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     except Exception as exc:
         print(f"[WARN] Failed to resolve FT body indices: {exc}. FT logging will write empty values.")
 
-    ft_log_dir = os.path.join("logs", "ft_sensor")
-    os.makedirs(ft_log_dir, exist_ok=True)
-    ft_log_path = os.path.join(ft_log_dir, f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
-
     def _serialize_ft_value(value):
         if isinstance(value, torch.Tensor):
             return value.detach().cpu().tolist()
@@ -212,17 +216,39 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     obs = env.get_observations()
     timestep = 0
     count = 0
-    with open(ft_log_path, "w", newline="") as ft_csv_file:
+
+    if not (0.0 <= args_cli.action_smoothing_alpha <= 1.0):
+        raise ValueError("--action_smoothing_alpha must be in [0, 1].")
+    action_smoothing_alpha = args_cli.action_smoothing_alpha
+    last_actions = None
+    
+    ft_csv_file = None
+    ft_writer = None
+    if args_cli.log:
+        os.makedirs(ft_log_dir, exist_ok=True)
+        ft_log_path = os.path.join(ft_log_dir, f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        ft_csv_file = open(ft_log_path, "w", newline="")
         ft_writer = csv.writer(ft_csv_file)
         ft_writer.writerow(["wall_time_iso", "step", "left_ft_joint", "right_ft_joint"])
+        print(f"[INFO] FT log file: {ft_log_path}")
 
+    try:
         # simulate environment
         while simulation_app.is_running():
             start_time = time.time()
             # run everything in inference mode
             with torch.inference_mode():
-                # agent stepping
-                actions = policy(obs)
+                raw_actions = policy(obs)
+                if last_actions is None or action_smoothing_alpha >= 1.0:
+                    actions = raw_actions
+                else:
+                    # First-order low-pass filter: smooth high-frequency action changes.
+                    actions = action_smoothing_alpha * raw_actions + (1.0 - action_smoothing_alpha) * last_actions
+                    # Reset filter state for done envs to avoid carrying stale actions across episode resets.
+                    if dones is not None and torch.any(dones):
+                        done_ids = torch.nonzero(dones, as_tuple=False).squeeze(-1)
+                        actions[done_ids] = raw_actions[done_ids]
+                last_actions = actions
                 # env stepping
                 obs, _, dones, _ = env.step(actions)
                 # reset recurrent states for episodes that have terminated
@@ -233,24 +259,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 if timestep == args_cli.video_length:
                     break
 
-            if count % 1 == 0:  # publish at every timestep so is 60 hz
-                if left_ft_body_idx is not None and right_ft_body_idx is not None:
-                    # Shape: (num_envs, num_bodies, 6). We log env-0 wrench [Fx, Fy, Fz, Tx, Ty, Tz].
-                    body_wrenches = robot.data.body_incoming_joint_wrench_b
-                    left_val = body_wrenches[0, left_ft_body_idx]
-                    right_val = body_wrenches[0, right_ft_body_idx]
-                else:
-                    left_val = None
-                    right_val = None
-                ft_writer.writerow(
-                    [
-                        datetime.now().isoformat(timespec="milliseconds"),
-                        count,
-                        _serialize_ft_value(left_val),
-                        _serialize_ft_value(right_val),
-                    ]
-                )
-                ft_csv_file.flush()
+            if count % 1 == 0:  # publish at every timestep so is 60
+                if args_cli.log and ft_writer is not None:
+                    if left_ft_body_idx is not None and right_ft_body_idx is not None:
+                        # Shape: (num_envs, num_bodies, 6). We log env-0 wrench [Fx, Fy, Fz, Tx, Ty, Tz].
+                        body_wrenches = robot.data.body_incoming_joint_wrench_b
+                        left_val = body_wrenches[0, left_ft_body_idx]
+                        right_val = body_wrenches[0, right_ft_body_idx]
+                    else:
+                        left_val = None
+                        right_val = None
+                    ft_writer.writerow(
+                        [
+                            datetime.now().isoformat(timespec="milliseconds"),
+                            count,
+                            _serialize_ft_value(left_val),
+                            _serialize_ft_value(right_val),
+                        ]
+                    )
+                    ft_csv_file.flush()
 
             # update counter for FT sensor logging
             count += 1
@@ -259,6 +286,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             sleep_time = dt - (time.time() - start_time)
             if args_cli.real_time and sleep_time > 0:
                 time.sleep(sleep_time)
+    finally:
+        if ft_csv_file is not None:
+            ft_csv_file.close()
 
     # close the simulator
     env.close()

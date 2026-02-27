@@ -92,3 +92,9 @@ class FrankaCubeLiftEnvCfg_PLAY(FrankaCubeLiftEnvCfg):
         self.scene.env_spacing = 2.5
         # disable randomization for play
         self.observations.policy.enable_corruption = False
+        # diable marker debug vis for play
+        self.commands.object_pose.debug_vis = False
+        # set view for recording
+        self.viewer.cam_prim_path = "/World/envs/env_0/Robot/fr3/fr3_hand/wrist_camera"
+        # shorter episode length for play
+        self.episode_length_s = 3.0
