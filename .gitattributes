@@ -1,0 +1,2 @@
+*.pth filter=lfs diff=lfs merge=lfs -text
+logs/rl_games/Factory/test/nn/*.pth filter=lfs diff=lfs merge=lfs -text
