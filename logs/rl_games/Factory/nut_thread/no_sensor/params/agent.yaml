@@ -109,4 +109,4 @@ params:
     player:
       deterministic: false
     device_name: cuda:0
-    train_dir: /home/tactilemanipulationlab/Projects/tactile-vla/logs/rl_games/Factory
+    train_dir: /home/zdli/Projects/tactile-vla/logs/rl_games/Factory
