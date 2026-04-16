@@ -1,0 +1,85 @@
+--- git status ---
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   scripts/rsl_rl/data_collect_play.py
+	modified:   source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/__pycache__/__init__.cpython-311.pyc
+	modified:   source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/assets/fr3_ft.usd
+	modified:   source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/joint_pos_env_cfg.py
+	modified:   source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/robot/__pycache__/franka3_contact_cfg.cpython-311.pyc
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	scripts/plot_data.py
+
+no changes added to commit (use "git add" and/or "git commit -a") 
+
+
+--- git diff ---
+diff --git a/scripts/rsl_rl/data_collect_play.py b/scripts/rsl_rl/data_collect_play.py
+index ba9d119..fd2d583 100644
+--- a/scripts/rsl_rl/data_collect_play.py
++++ b/scripts/rsl_rl/data_collect_play.py
+@@ -114,6 +114,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
+         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+ 
+     log_dir = os.path.dirname(resume_path)
++    ft_log_dir = os.path.join("logs", "ft_sensor")
++    os.makedirs(ft_log_dir, exist_ok=True)
++    ft_log_path = os.path.join(ft_log_dir, f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+ 
+     # set the log directory for the environment (works for all environment types)
+     env_cfg.log_dir = log_dir
+@@ -128,7 +131,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
+     # wrap for video recording
+     if args_cli.video:
+         video_kwargs = {
+-            "video_folder": os.path.join(log_dir, "videos", "play"),
++            "video_folder": os.path.join(ft_log_dir, "videos", datetime.now().strftime("%Y%m%d_%H%M%S")),
+             "step_trigger": lambda step: step == 0,
+             "video_length": args_cli.video_length,
+             "disable_logger": True,
+@@ -197,10 +200,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
+     except Exception as exc:
+         print(f"[WARN] Failed to resolve FT body indices: {exc}. FT logging will write empty values.")
+ 
+-    ft_log_dir = os.path.join("logs", "ft_sensor")
+-    os.makedirs(ft_log_dir, exist_ok=True)
+-    ft_log_path = os.path.join(ft_log_dir, f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+-
+     def _serialize_ft_value(value):
+         if isinstance(value, torch.Tensor):
+             return value.detach().cpu().tolist()
+diff --git a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/__pycache__/__init__.cpython-311.pyc b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/__pycache__/__init__.cpython-311.pyc
+index 9ea2218..0030e94 100644
+Binary files a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/__pycache__/__init__.cpython-311.pyc and b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/__pycache__/__init__.cpython-311.pyc differ
+diff --git a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/assets/fr3_ft.usd b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/assets/fr3_ft.usd
+index 26af9e8..6da2ba4 100644
+Binary files a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/assets/fr3_ft.usd and b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/assets/fr3_ft.usd differ
+diff --git a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/joint_pos_env_cfg.py b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/joint_pos_env_cfg.py
+index 4c696f3..5f8d066 100644
+--- a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/joint_pos_env_cfg.py
++++ b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/joint_pos_env_cfg.py
+@@ -33,7 +33,7 @@ class FrankaCubeLiftEnvCfg(LiftEnvCfg):
+ 
+         # Set actions for the specific robot type (franka)
+         self.actions.arm_action = mdp.JointPositionActionCfg(
+-            asset_name="robot", joint_names=["fr3_joint.*"], scale=0.5, use_default_offset=True
++            asset_name="robot", joint_names=["fr3_joint.*"], scale=0.25, use_default_offset=True
+         )
+         self.actions.gripper_action = mdp.BinaryJointPositionActionCfg(
+             asset_name="robot",
+@@ -92,3 +92,7 @@ class FrankaCubeLiftEnvCfg_PLAY(FrankaCubeLiftEnvCfg):
+         self.scene.env_spacing = 2.5
+         # disable randomization for play
+         self.observations.policy.enable_corruption = False
++        # diable marker debug vis for play
++        self.commands.object_pose.debug_vis = False
++        # set view for recording
++        self.viewer.cam_prim_path = "/World/envs/env_0/Robot/fr3/fr3_hand/wrist_camera"
+diff --git a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/robot/__pycache__/franka3_contact_cfg.cpython-311.pyc b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/robot/__pycache__/franka3_contact_cfg.cpython-311.pyc
+index bcb5bcf..c59fe40 100644
+Binary files a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/robot/__pycache__/franka3_contact_cfg.cpython-311.pyc and b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/robot/__pycache__/franka3_contact_cfg.cpython-311.pyc differ

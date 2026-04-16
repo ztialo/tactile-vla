@@ -1,0 +1,230 @@
+--- git status ---
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   scripts/rsl_rl/__pycache__/cli_args.cpython-311.pyc
+	modified:   source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/__init__.py
+	modified:   source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/__pycache__/__init__.cpython-311.pyc
+	modified:   source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/agents/rsl_rl_ppo_cfg.py
+	modified:   source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/agents/skrl_ppo_cfg.yaml
+	modified:   source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/assets/franka3.usd
+	modified:   source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/robot/__pycache__/franka3_contact_cfg.cpython-311.pyc
+	modified:   source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/robot/franka3_contact_cfg.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	logs/rsl_rl/
+	logs/skrl/cartpole_direct/2026-02-18_17-27-31_ppo_torch/
+	outputs/2026-02-18/
+	outputs/2026-02-26/
+	scripts/rsl_rl/__pycache__/data_collect_play.cpython-311.pyc
+	scripts/rsl_rl/data_collect_play.py
+	source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/__pycache__/joint_pos_env_cfg.cpython-311.pyc
+	source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/agents/__pycache__/rsl_rl_ppo_cfg.cpython-311.pyc
+	source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/assets/fr3_ft.usd
+	source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/assets/fr3_ft.usd.usda.txt
+	source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/assets/franka3.usd.usda.txt
+	source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/joint_pos_env_cfg.py
+	source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/robot/__init__.py
+	source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/robot/__pycache__/__init__.cpython-311.pyc
+
+no changes added to commit (use "git add" and/or "git commit -a") 
+
+
+--- git diff ---
+diff --git a/scripts/rsl_rl/__pycache__/cli_args.cpython-311.pyc b/scripts/rsl_rl/__pycache__/cli_args.cpython-311.pyc
+index ed3872b..cdf319c 100644
+Binary files a/scripts/rsl_rl/__pycache__/cli_args.cpython-311.pyc and b/scripts/rsl_rl/__pycache__/cli_args.cpython-311.pyc differ
+diff --git a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/__init__.py b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/__init__.py
+index c1b8e86..af21450 100644
+--- a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/__init__.py
++++ b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/__init__.py
+@@ -20,4 +20,35 @@ gym.register(
+         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+     },
+     disable_env_checker=True,
++)
++
++##
++# Joint Position Control
++##
++
++
++gym.register(
++    id="Isaac-Lift-Cube-Franka-v0",
++    entry_point="isaaclab.envs:ManagerBasedRLEnv",
++    kwargs={
++        "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:FrankaCubeLiftEnvCfg",
++        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:LiftCubePPORunnerCfg",
++        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
++        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
++        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
++    },
++    disable_env_checker=True,
++)
++
++gym.register(
++    id="Isaac-Lift-Cube-Franka-Play-v0",
++    entry_point="isaaclab.envs:ManagerBasedRLEnv",
++    kwargs={
++        "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:FrankaCubeLiftEnvCfg_PLAY",
++        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:LiftCubePPORunnerCfg",
++        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
++        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
++        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
++    },
++    disable_env_checker=True,
+ )
+\ No newline at end of file
+diff --git a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/__pycache__/__init__.cpython-311.pyc b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/__pycache__/__init__.cpython-311.pyc
+index 9ea2218..0030e94 100644
+Binary files a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/__pycache__/__init__.cpython-311.pyc and b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/__pycache__/__init__.cpython-311.pyc differ
+diff --git a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/agents/rsl_rl_ppo_cfg.py b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/agents/rsl_rl_ppo_cfg.py
+index 4556af6..54deeee 100644
+--- a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/agents/rsl_rl_ppo_cfg.py
++++ b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/agents/rsl_rl_ppo_cfg.py
+@@ -1,4 +1,4 @@
+-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
++# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+ # All rights reserved.
+ #
+ # SPDX-License-Identifier: BSD-3-Clause
+@@ -9,29 +9,29 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
+ 
+ 
+ @configclass
+-class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
+-    num_steps_per_env = 16
+-    max_iterations = 150
++class LiftCubePPORunnerCfg(RslRlOnPolicyRunnerCfg):
++    num_steps_per_env = 24
++    max_iterations = 1500
+     save_interval = 50
+-    experiment_name = "cartpole_direct"
++    experiment_name = "franka_lift"
+     policy = RslRlPpoActorCriticCfg(
+         init_noise_std=1.0,
+         actor_obs_normalization=False,
+         critic_obs_normalization=False,
+-        actor_hidden_dims=[32, 32],
+-        critic_hidden_dims=[32, 32],
++        actor_hidden_dims=[256, 128, 64],
++        critic_hidden_dims=[256, 128, 64],
+         activation="elu",
+     )
+     algorithm = RslRlPpoAlgorithmCfg(
+         value_loss_coef=1.0,
+         use_clipped_value_loss=True,
+         clip_param=0.2,
+-        entropy_coef=0.005,
++        entropy_coef=0.006,
+         num_learning_epochs=5,
+         num_mini_batches=4,
+-        learning_rate=1.0e-3,
++        learning_rate=1.0e-4,
+         schedule="adaptive",
+-        gamma=0.99,
++        gamma=0.98,
+         lam=0.95,
+         desired_kl=0.01,
+         max_grad_norm=1.0,
+diff --git a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/agents/skrl_ppo_cfg.yaml b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/agents/skrl_ppo_cfg.yaml
+index ab6674d..74a4a1c 100644
+--- a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/agents/skrl_ppo_cfg.yaml
++++ b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/agents/skrl_ppo_cfg.yaml
+@@ -1,3 +1,8 @@
++# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
++# All rights reserved.
++#
++# SPDX-License-Identifier: BSD-3-Clause
++
+ seed: 42
+ 
+ 
+@@ -15,7 +20,7 @@ models:
+     network:
+       - name: net
+         input: OBSERVATIONS
+-        layers: [32, 32]
++        layers: [256, 128, 64]
+         activations: elu
+     output: ACTIONS
+   value:  # see deterministic_model parameters
+@@ -24,7 +29,7 @@ models:
+     network:
+       - name: net
+         input: OBSERVATIONS
+-        layers: [32, 32]
++        layers: [256, 128, 64]
+         activations: elu
+     output: ONE
+ 
+@@ -40,15 +45,15 @@ memory:
+ # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html
+ agent:
+   class: PPO
+-  rollouts: 32
++  rollouts: 24
+   learning_epochs: 8
+-  mini_batches: 8
++  mini_batches: 4
+   discount_factor: 0.99
+   lambda: 0.95
+-  learning_rate: 5.0e-04
++  learning_rate: 1.0e-04
+   learning_rate_scheduler: KLAdaptiveLR
+   learning_rate_scheduler_kwargs:
+-    kl_threshold: 0.008
++    kl_threshold: 0.01
+   state_preprocessor: RunningStandardScaler
+   state_preprocessor_kwargs: null
+   value_preprocessor: RunningStandardScaler
+@@ -59,14 +64,14 @@ agent:
+   ratio_clip: 0.2
+   value_clip: 0.2
+   clip_predicted_values: True
+-  entropy_loss_scale: 0.0
++  entropy_loss_scale: 0.001
+   value_loss_scale: 2.0
+   kl_threshold: 0.0
+-  rewards_shaper_scale: 0.1
++  rewards_shaper_scale: 0.01
+   time_limit_bootstrap: False
+   # logging and checkpoint
+   experiment:
+-    directory: "cartpole_direct"
++    directory: "franka_lift"
+     experiment_name: ""
+     write_interval: auto
+     checkpoint_interval: auto
+@@ -76,5 +81,5 @@ agent:
+ # https://skrl.readthedocs.io/en/latest/api/trainers/sequential.html
+ trainer:
+   class: SequentialTrainer
+-  timesteps: 4800
++  timesteps: 36000
+   environment_info: log
+\ No newline at end of file
+diff --git a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/assets/franka3.usd b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/assets/franka3.usd
+index e784423..b41bdba 100644
+Binary files a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/assets/franka3.usd and b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/assets/franka3.usd differ
+diff --git a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/robot/__pycache__/franka3_contact_cfg.cpython-311.pyc b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/robot/__pycache__/franka3_contact_cfg.cpython-311.pyc
+index bcb5bcf..0d22554 100644
+Binary files a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/robot/__pycache__/franka3_contact_cfg.cpython-311.pyc and b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/robot/__pycache__/franka3_contact_cfg.cpython-311.pyc differ
+diff --git a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/robot/franka3_contact_cfg.py b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/robot/franka3_contact_cfg.py
+index 3df2ce4..7258a7b 100644
+--- a/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/robot/franka3_contact_cfg.py
++++ b/source/fr3_manipulation/fr3_manipulation/tasks/manager_based/fr3_manipulation/robot/franka3_contact_cfg.py
+@@ -5,7 +5,8 @@ import os
+ 
+ BASE_DIR = os.path.dirname(__file__)
+ ASSET_DIR = os.path.join(BASE_DIR, "..", "assets")  
+-FR3_USD_PATH = os.path.join(ASSET_DIR, "franka3.usd")
++FR3_USD_PATH = os.path.join(ASSET_DIR, "fr3_ft.usd")
++# FR3_USD_PATH = os.path.join(ASSET_DIR, "franka3.usd")
+ 
+ FRANKA_3_CFG = ArticulationCfg(
+     spawn=sim_utils.UsdFileCfg(
