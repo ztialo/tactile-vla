@@ -342,11 +342,14 @@ class FactoryEnv(DirectRLEnv):
 
     def _get_curr_successes(self, success_threshold, check_rot=False):
         """Get success mask at current timestep."""
+        # initialize boolean tensor for successes for each env
         curr_successes = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
 
+        # get current held pose relative to the base in world frame
         held_base_pos, held_base_quat = factory_utils.get_held_base_pose(
             self.held_pos, self.held_quat, self.cfg_task.name, self.cfg_task.fixed_asset_cfg, self.num_envs, self.device
         )
+        # get target held pose relative to the base in world frame
         target_held_base_pos, target_held_base_quat = factory_utils.get_target_held_base_pose(
             self.fixed_pos,
             self.fixed_quat,
@@ -356,9 +359,11 @@ class FactoryEnv(DirectRLEnv):
             self.device,
         )
 
+        # calculates the difference between current held pose to target held pose
         xy_dist = torch.linalg.vector_norm(target_held_base_pos[:, 0:2] - held_base_pos[:, 0:2], dim=1)
         z_disp = held_base_pos[:, 2] - target_held_base_pos[:, 2]
 
+        # Check if xy distance differences is within threshold, store result in tensor same shape as curr_successes
         is_centered = torch.where(xy_dist < 0.0025, torch.ones_like(curr_successes), torch.zeros_like(curr_successes))
         # Height threshold to target
         fixed_cfg = self.cfg_task.fixed_asset_cfg
@@ -368,14 +373,19 @@ class FactoryEnv(DirectRLEnv):
             height_threshold = fixed_cfg.thread_pitch * success_threshold
         else:
             raise NotImplementedError("Task not implemented")
+        
+        # similar to is_centered, check if z displacement is within threshold and store result in tensor same shape as curr_successes
         is_close_or_below = torch.where(
             z_disp < height_threshold, torch.ones_like(curr_successes), torch.zeros_like(curr_successes)
         )
+
+        # store bool tensor where both conditions are satisfied in curr_successes
         curr_successes = torch.logical_and(is_centered, is_close_or_below)
 
         if check_rot:
             _, _, curr_yaw = torch_utils.get_euler_xyz(self.fingertip_midpoint_quat)
             curr_yaw = factory_utils.wrap_yaw(curr_yaw)
+            # Success criteria
             is_rotated = curr_yaw < self.cfg_task.ee_success_yaw
             curr_successes = torch.logical_and(curr_successes, is_rotated)
 
