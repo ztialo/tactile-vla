@@ -69,9 +69,11 @@ def get_held_base_pos_local(task_name, fixed_asset_cfg, num_envs, device):
 
 def get_held_base_pose(held_pos, held_quat, task_name, fixed_asset_cfg, num_envs, device):
     """Get current poses for keypoint and success computation."""
+    # Get held object pose relative to base's local frame
     held_base_pos_local = get_held_base_pos_local(task_name, fixed_asset_cfg, num_envs, device)
     held_base_quat_local = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).unsqueeze(0).repeat(num_envs, 1)
 
+    # combine all local frame pose and transform to world frame
     held_base_quat, held_base_pos = torch_utils.tf_combine(
         held_quat, held_pos, held_base_quat_local, held_base_pos_local
     )

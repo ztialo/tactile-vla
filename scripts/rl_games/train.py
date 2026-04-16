@@ -143,20 +143,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     else:
         log_root_path = os.path.abspath(log_root_path)
 
-    print(f"[INFO] Logging experiment in directory: {log_root_path}")
-    # specify directory for logging runs
-    log_dir = agent_cfg["params"]["config"].get("full_experiment_name", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
+    # organize runs as: <log_root_path>/<task_name>/<timestamp>
+    task_log_dir = getattr(env_cfg, "task_name", config_name)
+    run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_root_dir = os.path.join(log_root_path, task_log_dir)
+    run_path = os.path.join(run_root_dir, run_timestamp)
+
+    print(f"[INFO] Logging experiment in directory: {run_root_dir}")
+    print(f"[INFO] Logging run in directory: {run_path}")
+
     # set directory into agent config
     # logging directory path: <train_dir>/<full_experiment_name>
-    agent_cfg["params"]["config"]["train_dir"] = log_root_path
-    agent_cfg["params"]["config"]["full_experiment_name"] = log_dir
+    agent_cfg["params"]["config"]["train_dir"] = run_root_dir
+    agent_cfg["params"]["config"]["full_experiment_name"] = run_timestamp
     wandb_project = config_name if args_cli.wandb_project_name is None else args_cli.wandb_project_name
-    experiment_name = log_dir if args_cli.wandb_name is None else args_cli.wandb_name
+    experiment_name = run_timestamp if args_cli.wandb_name is None else args_cli.wandb_name
 
     # dump the configuration into log-directory
-    dump_yaml(os.path.join(log_root_path, log_dir, "params", "env.yaml"), env_cfg)
-    dump_yaml(os.path.join(log_root_path, log_dir, "params", "agent.yaml"), agent_cfg)
-    print(f"Exact experiment name requested from command line: {os.path.join(log_root_path, log_dir)}")
+    dump_yaml(os.path.join(run_path, "params", "env.yaml"), env_cfg)
+    dump_yaml(os.path.join(run_path, "params", "agent.yaml"), agent_cfg)
+    print(f"Exact experiment name requested from command line: {run_path}")
 
     # read configurations about the agent-training
     rl_device = agent_cfg["params"]["config"]["device"]
@@ -174,7 +180,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         )
 
     # set the log directory for the environment (works for all environment types)
-    env_cfg.log_dir = os.path.join(log_root_path, log_dir)
+    env_cfg.log_dir = run_path
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -186,7 +192,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # wrap for video recording
     if args_cli.video:
         video_kwargs = {
-            "video_folder": os.path.join(log_root_path, log_dir, "videos", "train"),
+            "video_folder": os.path.join(run_path, "videos", "train"),
             "step_trigger": lambda step: step % args_cli.video_interval == 0,
             "video_length": args_cli.video_length,
             "disable_logger": True,
