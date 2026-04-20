@@ -10,6 +10,8 @@
 import argparse
 import sys
 
+from robot_cfg import add_robot_arg, enable_cameras_for_robot
+
 from isaaclab.app import AppLauncher
 
 # add argparse arguments
@@ -42,6 +44,7 @@ parser.add_argument(
     action="store_true",
     help="When no checkpoint provided, use the last saved model. Otherwise use the best saved model.",
 )
+add_robot_arg(parser)
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -50,6 +53,7 @@ args_cli, hydra_args = parser.parse_known_args()
 # always enable cameras to record video
 if args_cli.video:
     args_cli.enable_cameras = True
+enable_cameras_for_robot(args_cli)
 
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
@@ -89,6 +93,7 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import fr3_manipulation.tasks  # noqa: F401
+from robot_cfg import apply_robot_cfg
 
 # PLACEHOLDER: Extension template (do not remove this comment)
 
@@ -117,6 +122,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    apply_robot_cfg(env_cfg, args_cli.robot)
 
     # randomly sample a seed if seed = -1
     if args_cli.seed == -1:
