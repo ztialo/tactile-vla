@@ -40,7 +40,7 @@ FRANKA_3_CFG = ArticulationCfg(
             stiffness=80.0,
             damping=4.0,
         ),
-        "cccccccccccccccccccccccc": ImplicitActuatorCfg(
+        "fr3_forearm": ImplicitActuatorCfg(
             joint_names_expr=["fr3_joint[5-7]"],
             effort_limit_sim=12.0,
             stiffness=80.0,
