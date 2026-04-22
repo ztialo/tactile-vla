@@ -67,9 +67,9 @@ class FactoryEnv(DirectRLEnv):
         self.init_fixed_pos_obs_noise = torch.zeros((self.num_envs, 3), device=self.device)
 
         # Computer body indices.
-        self.left_finger_body_idx = self._robot.body_names.index("panda_leftfinger")
-        self.right_finger_body_idx = self._robot.body_names.index("panda_rightfinger")
-        self.fingertip_body_idx = self._robot.body_names.index("panda_fingertip_centered")
+        self.left_finger_body_idx = self._get_body_index("fr3_leftfinger")
+        self.right_finger_body_idx = self._get_body_index("fr3_rightfinger")
+        self.fingertip_body_idx = self._get_body_index("fr3_hand_tcp", "fr3_hand")
 
         # Tensors for finite-differencing.
         self.last_update_timestamp = 0.0  # Note: This is for finite differencing body velocities.
@@ -81,6 +81,13 @@ class FactoryEnv(DirectRLEnv):
 
         self.ep_succeeded = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
         self.ep_success_times = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
+
+    def _get_body_index(self, *body_names):
+        """Return the first matching body index from a list of naming variants."""
+        for body_name in body_names:
+            if body_name in self._robot.body_names:
+                return self._robot.body_names.index(body_name)
+        raise ValueError(f"None of the expected bodies {body_names} exist. Available bodies: {self._robot.body_names}")
 
     def _setup_scene(self):
         """Initialize simulation scene."""
