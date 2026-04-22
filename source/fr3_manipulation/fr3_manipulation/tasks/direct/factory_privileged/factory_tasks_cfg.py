@@ -51,7 +51,7 @@ class FactoryTask:
     hand_init_pos: list = [0.0, 0.0, 0.015]  # Relative to fixed asset tip.
     hand_init_pos_noise: list = [0.02, 0.02, 0.01]
     hand_init_orn: list = [3.1416, 0, 2.356]
-    hand_init_orn_noise: list = [0.0, 0.0, 1.57]
+    hand_init_orn_noise: list = [0.785, 0.785, 1.57]
 
     # Action
     unidirectional_rot: bool = False
@@ -112,7 +112,7 @@ class PegInsert(FactoryTask):
     hand_init_pos: list = [0.0, 0.0, 0.047]  # Relative to fixed asset tip.
     hand_init_pos_noise: list = [0.02, 0.02, 0.01]
     hand_init_orn: list = [3.1416, 0.0, 0.0]
-    hand_init_orn_noise: list = [0.0, 0.0, 0.785]
+    hand_init_orn_noise: list = [0.785, 0.785, 0.785]
 
     # Fixed Asset (applies to all tasks)
     fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.05]
@@ -271,7 +271,7 @@ class GearMesh(FactoryTask):
     hand_init_pos: list = [0.0, 0.0, 0.035]  # Relative to fixed asset tip.
     hand_init_pos_noise: list = [0.02, 0.02, 0.01]
     hand_init_orn: list = [3.1416, 0, 0.0]
-    hand_init_orn_noise: list = [0.0, 0.0, 0.785]
+    hand_init_orn_noise: list = [0.785, 0.785, 0.785]
 
     # Fixed Asset (applies to all tasks)
     fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.05]
@@ -371,7 +371,7 @@ class NutThread(FactoryTask):
     hand_init_pos: list = [0.0, 0.0, 0.015]  # Relative to fixed asset tip.
     hand_init_pos_noise: list = [0.02, 0.02, 0.01]
     hand_init_orn: list = [3.1416, 0.0, 1.83]
-    hand_init_orn_noise: list = [0.0, 0.0, 0.26]
+    hand_init_orn_noise: list = [0.785, 0.785, 0.26]
 
     # Action
     unidirectional_rot: bool = True
