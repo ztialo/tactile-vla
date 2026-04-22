@@ -50,7 +50,7 @@ AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
 # always enable cameras to record video
-if args_cli.video:
+if args_cli.video or "Visuomotor" in (args_cli.task or ""):
     args_cli.enable_cameras = True
 
 # clear out sys.argv for Hydra

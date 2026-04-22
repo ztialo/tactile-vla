@@ -18,6 +18,7 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{__name__}.factory_env_cfg:FactoryTaskPegInsertCfg",
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:FactoryPrivilegedPPORunnerCfg",
     },
 )
 
@@ -28,6 +29,7 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{__name__}.factory_env_cfg:FactoryTaskGearMeshCfg",
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:FactoryPrivilegedPPORunnerCfg",
     },
 )
 
@@ -38,5 +40,6 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{__name__}.factory_env_cfg:FactoryTaskNutThreadCfg",
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:FactoryPrivilegedPPORunnerCfg",
     },
 )

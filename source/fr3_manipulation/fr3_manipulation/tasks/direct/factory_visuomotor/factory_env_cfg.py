@@ -16,8 +16,10 @@ from .factory_tasks_cfg import FactoryTask, GearMesh, NutThread, PegInsert
 
 CAMERA_HEIGHT = 180
 CAMERA_WIDTH = 320
+IMAGE_EMBED_DIM = 256
 PROPRIO_DIM = 16  # joint_pos(7) + gripper_pos(1) + prev_action(8)
 PREV_ACTION_DIM = 8
+STUDENT_OBS_DIM = IMAGE_EMBED_DIM + PROPRIO_DIM
 
 STATE_DIM_CFG = {
     "fingertip_pos": 3,
@@ -68,8 +70,8 @@ class CtrlCfg:
 class FactoryEnvCfg(DirectRLEnvCfg):
     decimation = 8
     action_space = 6
-    # Policy obs is wrist RGB plus proprio channels broadcast over the image.
-    observation_space = [CAMERA_HEIGHT, CAMERA_WIDTH, 3 + PROPRIO_DIM]
+    # Policy obs is frozen wrist-RGB embedding plus proprio. Critic obs is privileged teacher state.
+    observation_space = STUDENT_OBS_DIM
     state_space = 72
     obs_order: list = ["fingertip_pos_rel_fixed", "fingertip_quat", "ee_linvel", "ee_angvel"]
     state_order: list = [

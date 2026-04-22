@@ -5,6 +5,7 @@
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 import carb
 import isaacsim.core.utils.torch as torch_utils
@@ -18,7 +19,35 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.math import axis_angle_from_quat
 
 from . import factory_control, factory_utils
-from .factory_env_cfg import PREV_ACTION_DIM, STATE_DIM_CFG, FactoryEnvCfg
+from .factory_env_cfg import IMAGE_EMBED_DIM, PREV_ACTION_DIM, STATE_DIM_CFG, FactoryEnvCfg
+
+
+class FrozenWristRgbEncoder(nn.Module):
+    """Small frozen      that maps wrist RGB images to a fixed-size embedding."""
+
+    def __init__(self, embedding_dim: int):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Linear(64, embedding_dim),
+            nn.ReLU(),
+        )
+        # Freeze the encoder
+        for param in self.parameters():
+            param.requires_grad = False
+        self.eval()
+
+    @torch.no_grad()
+    def forward(self, rgb):
+        rgb = rgb.permute(0, 3, 1, 2).contiguous()
+        return self.encoder(rgb)
 
 
 class FactoryEnv(DirectRLEnv):
@@ -27,11 +56,12 @@ class FactoryEnv(DirectRLEnv):
     def __init__(self, cfg: FactoryEnvCfg, render_mode: str | None = None, **kwargs):
         # Update number of obs/states
         cfg.state_space = sum([STATE_DIM_CFG[state] for state in cfg.state_order])
-        cfg.state_space += PREV_ACTION_DIM
+        cfg.state_space += cfg.action_space
         self.cfg_task = cfg.task
 
         super().__init__(cfg, render_mode, **kwargs)
 
+        self._wrist_rgb_encoder = FrozenWristRgbEncoder(IMAGE_EMBED_DIM).to(self.device)
         factory_utils.set_body_inertias(self._robot, self.scene.num_envs)
         self._init_tensors()
         self._set_default_dynamics_parameters()
@@ -168,7 +198,7 @@ class FactoryEnv(DirectRLEnv):
 
     def _get_factory_obs_state_dict(self):
         """Populate dictionaries for the policy and critic."""
-        prev_actions = self.prev_action_obs.clone()
+        prev_actions = self.actions.clone()
 
         state_dict = {
             "fingertip_pos": self.fingertip_midpoint_pos,
@@ -196,10 +226,8 @@ class FactoryEnv(DirectRLEnv):
         camera_rgb = self._wrist_camera.data.output["rgb"][..., :3].float() / 255.0
         gripper_pos = torch.mean(self.joint_pos[:, 7:], dim=1, keepdim=True)
         proprio = torch.cat((self.joint_pos[:, 0:7], gripper_pos, self.prev_action_obs), dim=-1)
-        proprio_planes = proprio[:, None, None, :].expand(
-            -1, self.cfg.wrist_camera.height, self.cfg.wrist_camera.width, -1
-        )
-        obs_tensors = torch.cat((camera_rgb, proprio_planes), dim=-1)
+        image_embedding = self._wrist_rgb_encoder(camera_rgb)
+        obs_tensors = torch.cat((image_embedding, proprio), dim=-1)
         state_tensors = factory_utils.collapse_obs_dict(state_dict, self.cfg.state_order + ["prev_actions"])
         return {"policy": obs_tensors, "critic": state_tensors}
 
