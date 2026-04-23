@@ -15,9 +15,9 @@ class FactoryPrivilegedPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     save_interval = 50
     experiment_name = "factory_privileged"
     run_name = "teacher"
-    obs_groups = {"actor": ["critic"], "critic": ["critic"]}
+    obs_groups = {"policy": ["critic"], "critic": ["critic"]}
 
-    actor = RslRlMLPModelCfg(
+    policy = RslRlMLPModelCfg(
         hidden_dims=[512, 128, 64],
         activation="elu",
         obs_normalization=True,
