@@ -150,10 +150,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # set the IO descriptors export flag if requested
     if isinstance(env_cfg, ManagerBasedRLEnvCfg):
         env_cfg.export_io_descriptors = args_cli.export_io_descriptors
-    else:
-        omni.log.warn(
-            "IO descriptors are only supported for manager based RL environments. No IO descriptors will be exported."
-        )
+    elif args_cli.export_io_descriptors:
+        print("[WARN] IO descriptors are only supported for manager based RL environments. No IO descriptors exported.")
 
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
@@ -204,7 +202,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
 
     # run training
-    runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
+    runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=False)
 
     # close the simulator
     env.close()

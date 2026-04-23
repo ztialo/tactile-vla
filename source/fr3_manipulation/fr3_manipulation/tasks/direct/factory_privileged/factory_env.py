@@ -345,6 +345,8 @@ class FactoryEnv(DirectRLEnv):
         """
         self._compute_intermediate_values(dt=self.physics_dt)
         time_out = self.episode_length_buf >= self.max_episode_length - 1
+        if torch.any(time_out):
+            time_out = torch.ones_like(time_out)
         return time_out, time_out
 
     def _get_curr_successes(self, success_threshold, check_rot=False):
@@ -504,6 +506,8 @@ class FactoryEnv(DirectRLEnv):
 
     def _reset_idx(self, env_ids):
         """We assume all envs will always be reset at the same time."""
+        if len(env_ids) != self.num_envs:
+            env_ids = torch.arange(self.num_envs, device=self.device)
         super()._reset_idx(env_ids)
 
         self._set_assets_to_default_pose(env_ids)
