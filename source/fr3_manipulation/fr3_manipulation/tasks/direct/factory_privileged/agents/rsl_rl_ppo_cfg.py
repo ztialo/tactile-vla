@@ -5,7 +5,7 @@
 
 from isaaclab.utils import configclass
 
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg
+from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticRecurrentCfg
 
 
 @configclass
@@ -33,32 +33,35 @@ class RslRlPpoAlgorithmCompatCfg:
 @configclass
 class FactoryPrivilegedPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 128
-    max_iterations = 2000
-    save_interval = 50
+    max_iterations = 200
+    save_interval = 100
     experiment_name = "factory_privileged"
     run_name = "teacher"
     obs_groups = {"policy": ["critic"], "critic": ["critic"]}
 
-    policy = RslRlPpoActorCriticCfg(
+    policy = RslRlPpoActorCriticRecurrentCfg(
         init_noise_std=1.0,
         actor_obs_normalization=True,
         critic_obs_normalization=True,
         actor_hidden_dims=[512, 128, 64],
         critic_hidden_dims=[512, 128, 64],
         activation="elu",
+        rnn_type="lstm",
+        rnn_hidden_dim=1024,
+        rnn_num_layers=2,
     )
 
     algorithm = RslRlPpoAlgorithmCompatCfg(
-        value_loss_coef=1.0,
+        value_loss_coef=2.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.006,
-        num_learning_epochs=5,
-        num_mini_batches=4,
+        entropy_coef=0.0,
+        num_learning_epochs=4,
+        num_mini_batches=32,
         learning_rate=1.0e-4,
         schedule="adaptive",
-        gamma=0.99,
+        gamma=0.995,
         lam=0.95,
-        desired_kl=0.01,
+        desired_kl=0.008,
         max_grad_norm=1.0,
     )

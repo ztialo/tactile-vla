@@ -9,6 +9,8 @@
 # Training/runtime artifacts
 logs/
 outputs/
+wandb/
+wandb-*
 
 # Model/checkpoint exports
 *.pt
