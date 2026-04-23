@@ -169,6 +169,9 @@ class FactoryEnv(DirectRLEnv):
         noisy_fixed_pos = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
 
         prev_actions = self.actions.clone()
+        fixed_quat_inv = torch_utils.quat_conjugate(self.fixed_quat)
+        fingertip_quat_rel_fixed = torch_utils.quat_mul(fixed_quat_inv, self.fingertip_midpoint_quat)
+        held_quat_rel_fixed = torch_utils.quat_mul(fixed_quat_inv, self.held_quat)
 
         obs_dict = {
             "fingertip_pos": self.fingertip_midpoint_pos,
@@ -183,12 +186,14 @@ class FactoryEnv(DirectRLEnv):
             "fingertip_pos": self.fingertip_midpoint_pos,
             "fingertip_pos_rel_fixed": self.fingertip_midpoint_pos - self.fixed_pos_obs_frame,
             "fingertip_quat": self.fingertip_midpoint_quat,
+            "fingertip_quat_rel_fixed": fingertip_quat_rel_fixed,
             "ee_linvel": self.fingertip_midpoint_linvel,
             "ee_angvel": self.fingertip_midpoint_angvel,
             "joint_pos": self.joint_pos[:, 0:7],
             "held_pos": self.held_pos,
             "held_pos_rel_fixed": self.held_pos - self.fixed_pos_obs_frame,
             "held_quat": self.held_quat,
+            "held_quat_rel_fixed": held_quat_rel_fixed,
             "fixed_pos": self.fixed_pos,
             "fixed_quat": self.fixed_quat,
             "task_prop_gains": self.task_prop_gains,

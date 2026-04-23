@@ -34,14 +34,38 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument(
+    "--log_path",
+    type=str,
+    default=None,
+    help="Path to an HDF5 file for logging vision rollout data. If omitted, logging is disabled.",
+)
+parser.add_argument(
+    "--max_steps",
+    type=int,
+    default=0,
+    help="Maximum number of simulator steps to log. Use 0 to run until the simulator closes.",
+)
+parser.add_argument(
+    "--log_env_ids",
+    type=str,
+    default="all",
+    help="Comma-separated env ids to log, or 'all'.",
+)
+parser.add_argument(
+    "--no_log_images",
+    action="store_true",
+    default=False,
+    help="Skip wrist RGB image logging and only log state/action labels.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
-# always enable cameras to record video
-if args_cli.video or "Visuomotor" in (args_cli.task or ""):
+# always enable cameras to record video or vision rollouts
+if args_cli.video or (args_cli.log_path and not args_cli.no_log_images) or "Visuomotor" in (args_cli.task or ""):
     args_cli.enable_cameras = True
 
 # clear out sys.argv for Hydra
@@ -54,6 +78,8 @@ simulation_app = app_launcher.app
 """Rest everything follows."""
 
 import gymnasium as gym
+import h5py
+import numpy as np
 import os
 import time
 import torch
@@ -69,7 +95,8 @@ from isaaclab.envs import (
 )
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
-from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
+from isaaclab.utils import math as torch_utils
+from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
 
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, export_policy_as_jit, export_policy_as_onnx
 
@@ -78,6 +105,57 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import fr3_manipulation.tasks  # noqa: F401
+
+
+def _parse_env_ids(spec: str, num_envs: int, device: torch.device) -> torch.Tensor:
+    """Parse a comma-separated env id list or 'all'."""
+    if spec.lower() == "all":
+        return torch.arange(num_envs, device=device)
+    env_ids = [int(item.strip()) for item in spec.split(",") if item.strip()]
+    if not env_ids:
+        raise ValueError("--log_env_ids must be 'all' or a non-empty comma-separated id list.")
+    if min(env_ids) < 0 or max(env_ids) >= num_envs:
+        raise ValueError(f"--log_env_ids contains an id outside [0, {num_envs - 1}].")
+    return torch.tensor(env_ids, dtype=torch.long, device=device)
+
+
+def _tensor_to_numpy(value: torch.Tensor, env_ids: torch.Tensor | None = None, dtype=None) -> np.ndarray:
+    """Select env rows and move a tensor to CPU numpy."""
+    if env_ids is not None:
+        value = value[env_ids]
+    array = value.detach().cpu().numpy()
+    if dtype is not None:
+        array = array.astype(dtype)
+    return array
+
+
+def _append_h5_batch(h5_file: h5py.File, batch: dict[str, np.ndarray]):
+    """Append a batch of row-major data into extendable HDF5 datasets."""
+    for name, array in batch.items():
+        if name not in h5_file:
+            compression = "gzip" if array.ndim >= 4 else None
+            h5_file.create_dataset(
+                name,
+                data=array,
+                maxshape=(None, *array.shape[1:]),
+                chunks=True,
+                compression=compression,
+            )
+        else:
+            dataset = h5_file[name]
+            old_size = dataset.shape[0]
+            dataset.resize(old_size + array.shape[0], axis=0)
+            dataset[old_size:] = array
+
+
+def _get_timeout_tensor(extras: dict, dones: torch.Tensor) -> torch.Tensor:
+    """Best-effort extraction of timeout flags from RSL/IsaacLab extras."""
+    for key in ("time_outs", "timeouts", "truncated", "truncations"):
+        if key in extras:
+            value = extras[key]
+            if isinstance(value, torch.Tensor):
+                return value.to(device=dones.device, dtype=torch.bool)
+    return torch.zeros_like(dones, dtype=torch.bool)
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -173,31 +251,121 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
 
     dt = env.unwrapped.step_dt
+    base_env = env.unwrapped
+
+    h5_file = None
+    log_env_ids = None
+    episode_ids = None
+    timestep_in_episode = None
+    if args_cli.log_path:
+        os.makedirs(os.path.dirname(os.path.abspath(args_cli.log_path)), exist_ok=True)
+        h5_file = h5py.File(args_cli.log_path, "w")
+        log_env_ids = _parse_env_ids(args_cli.log_env_ids, base_env.num_envs, base_env.device)
+        episode_ids = torch.zeros(base_env.num_envs, dtype=torch.int64, device=base_env.device)
+        timestep_in_episode = torch.zeros(base_env.num_envs, dtype=torch.int64, device=base_env.device)
+        h5_file.attrs["task"] = args_cli.task
+        h5_file.attrs["checkpoint"] = resume_path
+        h5_file.attrs["num_envs"] = base_env.num_envs
+        h5_file.attrs["logged_env_ids"] = _tensor_to_numpy(log_env_ids, dtype=np.int64)
+        h5_file.attrs["action_order"] = "dx,dy,dz,droll,dpitch,dyaw"
+        h5_file.attrs["quat_order"] = "w,x,y,z"
+        print(f"[INFO] Vision rollout HDF5 log: {os.path.abspath(args_cli.log_path)}")
+        print(f"[INFO] Logging env ids: {h5_file.attrs['logged_env_ids'].tolist()}")
 
     # reset environment
     obs = env.get_observations()
     timestep = 0
-    # simulate environment
-    while simulation_app.is_running():
-        start_time = time.time()
-        # run everything in inference mode
-        with torch.inference_mode():
-            # agent stepping
-            actions = policy(obs)
-            # env stepping
-            obs, _, dones, _ = env.step(actions)
-            # reset recurrent states for episodes that have terminated
-            policy_nn.reset(dones)
-        if args_cli.video:
-            timestep += 1
-            # Exit the play loop after recording one video
-            if timestep == args_cli.video_length:
+    try:
+        # simulate environment
+        while simulation_app.is_running():
+            start_time = time.time()
+            # run everything in inference mode
+            with torch.inference_mode():
+                # agent stepping
+                actions = policy(obs)
+                # env stepping
+                obs, _, dones, extras = env.step(actions)
+                # reset recurrent states for episodes that have terminated
+                policy_nn.reset(dones)
+
+                if h5_file is not None:
+                    timeout = _get_timeout_tensor(extras, dones)
+                    fixed_quat_inv = torch_utils.quat_conjugate(base_env.fixed_quat)
+                    fingertip_quat_rel_fixed = torch_utils.quat_mul(
+                        fixed_quat_inv, base_env.fingertip_midpoint_quat
+                    )
+                    held_quat_rel_fixed = torch_utils.quat_mul(fixed_quat_inv, base_env.held_quat)
+                    gripper_pos = torch.mean(base_env.joint_pos[:, 7:], dim=1, keepdim=True)
+                    prev_action = (
+                        base_env.prev_action_obs
+                        if hasattr(base_env, "prev_action_obs")
+                        else base_env.actions
+                    )
+
+                    env_id_batch = _tensor_to_numpy(log_env_ids, dtype=np.int64)
+                    batch_size = env_id_batch.shape[0]
+                    batch = {
+                        "env_id": env_id_batch,
+                        "global_step": np.full((batch_size,), timestep, dtype=np.int64),
+                        "episode_id": _tensor_to_numpy(episode_ids, log_env_ids, dtype=np.int64),
+                        "timestep_in_episode": _tensor_to_numpy(timestep_in_episode, log_env_ids, dtype=np.int64),
+                        "done": _tensor_to_numpy(dones, log_env_ids, dtype=np.bool_),
+                        "timeout": _tensor_to_numpy(timeout, log_env_ids, dtype=np.bool_),
+                        "joint_pos": _tensor_to_numpy(base_env.joint_pos[:, 0:7], log_env_ids, dtype=np.float32),
+                        "gripper_pos": _tensor_to_numpy(gripper_pos, log_env_ids, dtype=np.float32),
+                        "prev_action": _tensor_to_numpy(prev_action, log_env_ids, dtype=np.float32),
+                        "action": _tensor_to_numpy(actions, log_env_ids, dtype=np.float32),
+                        "fingertip_pos_rel_fixed": _tensor_to_numpy(
+                            base_env.fingertip_midpoint_pos - base_env.fixed_pos_obs_frame,
+                            log_env_ids,
+                            dtype=np.float32,
+                        ),
+                        "held_pos_rel_fixed": _tensor_to_numpy(
+                            base_env.held_pos - base_env.fixed_pos_obs_frame,
+                            log_env_ids,
+                            dtype=np.float32,
+                        ),
+                        "fingertip_quat_rel_fixed": _tensor_to_numpy(
+                            fingertip_quat_rel_fixed, log_env_ids, dtype=np.float32
+                        ),
+                        "held_quat_rel_fixed": _tensor_to_numpy(held_quat_rel_fixed, log_env_ids, dtype=np.float32),
+                    }
+                    if not args_cli.no_log_images:
+                        if not hasattr(base_env, "_wrist_camera"):
+                            raise AttributeError(
+                                "The env has no _wrist_camera. Use a visuomotor task or pass --no_log_images."
+                            )
+                        wrist_rgb = base_env._wrist_camera.data.output["rgb"][..., :3]
+                        if wrist_rgb.dtype.is_floating_point:
+                            wrist_rgb = torch.clamp(wrist_rgb * 255.0, 0.0, 255.0).to(torch.uint8)
+                        else:
+                            wrist_rgb = wrist_rgb.to(torch.uint8)
+                        batch["wrist_rgb"] = _tensor_to_numpy(wrist_rgb, log_env_ids)
+                    _append_h5_batch(h5_file, batch)
+                    h5_file.flush()
+
+                    timestep_in_episode += 1
+                    if torch.any(dones):
+                        episode_ids[dones] += 1
+                        timestep_in_episode[dones] = 0
+
+            if args_cli.video:
+                timestep += 1
+                # Exit the play loop after recording one video
+                if timestep == args_cli.video_length:
+                    break
+            else:
+                timestep += 1
+            if args_cli.max_steps > 0 and timestep >= args_cli.max_steps:
                 break
 
-        # time delay for real-time evaluation
-        sleep_time = dt - (time.time() - start_time)
-        if args_cli.real_time and sleep_time > 0:
-            time.sleep(sleep_time)
+            # time delay for real-time evaluation
+            sleep_time = dt - (time.time() - start_time)
+            if args_cli.real_time and sleep_time > 0:
+                time.sleep(sleep_time)
+    finally:
+        if h5_file is not None:
+            h5_file.close()
 
     # close the simulator
     env.close()
