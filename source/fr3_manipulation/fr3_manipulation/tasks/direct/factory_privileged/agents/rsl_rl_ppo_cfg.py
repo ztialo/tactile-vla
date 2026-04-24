@@ -37,7 +37,7 @@ class FactoryPrivilegedPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     save_interval = 50
     experiment_name = "factory_privileged"
     run_name = "teacher"
-    obs_groups = {"policy": ["critic"], "critic": ["critic"]}
+    obs_groups = {"policy": ["policy"], "critic": ["critic"]}
 
     policy = RslRlPpoActorCriticRecurrentCfg(
         init_noise_std=1.0,
