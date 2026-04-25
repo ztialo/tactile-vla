@@ -5,7 +5,7 @@
 
 from isaaclab.utils import configclass
 
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticRecurrentCfg
+from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg
 
 
 @configclass
@@ -39,16 +39,13 @@ class FactoryPrivilegedPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     run_name = "teacher"
     obs_groups = {"policy": ["policy"], "critic": ["critic"]}
 
-    policy = RslRlPpoActorCriticRecurrentCfg(
+    policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
         actor_obs_normalization=True,
         critic_obs_normalization=True,
         actor_hidden_dims=[512, 128, 64],
         critic_hidden_dims=[512, 128, 64],
         activation="elu",
-        rnn_type="lstm",
-        rnn_hidden_dim=1024,
-        rnn_num_layers=2,
     )
 
     algorithm = RslRlPpoAlgorithmCompatCfg()
