@@ -130,7 +130,7 @@ class FactoryEnv(DirectRLEnv):
         )
 
         self._robot = Articulation(self.cfg.robot)
-        self._wrist_camera = TiledCamera(self.cfg.wrist_camera)
+        self._wrist_camera = TiledCamera(self.cfg.wrist_camera) if self.cfg.wrist_camera is not None else None
         self._fixed_asset = Articulation(self.cfg_task.fixed_asset)
         self._held_asset = Articulation(self.cfg_task.held_asset)
         if self.cfg_task.name == "gear_mesh":
@@ -143,7 +143,8 @@ class FactoryEnv(DirectRLEnv):
             self.scene.filter_collisions()
 
         self.scene.articulations["robot"] = self._robot
-        self.scene.sensors["wrist_camera"] = self._wrist_camera
+        if self._wrist_camera is not None:
+            self.scene.sensors["wrist_camera"] = self._wrist_camera
         self.scene.articulations["fixed_asset"] = self._fixed_asset
         self.scene.articulations["held_asset"] = self._held_asset
         if self.cfg_task.name == "gear_mesh":
@@ -223,10 +224,13 @@ class FactoryEnv(DirectRLEnv):
         """Get actor/critic inputs using asymmetric critic."""
         state_dict = self._get_factory_obs_state_dict()
 
-        camera_rgb = self._wrist_camera.data.output["rgb"][..., :3].float() / 255.0
         gripper_pos = torch.mean(self.joint_pos[:, 7:], dim=1, keepdim=True)
         proprio = torch.cat((self.joint_pos[:, 0:7], gripper_pos, self.prev_action_obs), dim=-1)
-        image_embedding = self._wrist_rgb_encoder(camera_rgb)
+        if self._wrist_camera is not None:
+            camera_rgb = self._wrist_camera.data.output["rgb"][..., :3].float() / 255.0
+            image_embedding = self._wrist_rgb_encoder(camera_rgb)
+        else:
+            image_embedding = torch.zeros((self.num_envs, IMAGE_EMBED_DIM), device=self.device)
         obs_tensors = torch.cat((image_embedding, proprio), dim=-1)
         state_tensors = factory_utils.collapse_obs_dict(state_dict, self.cfg.state_order + ["prev_actions"])
         return {"policy": obs_tensors, "critic": state_tensors}
