@@ -132,6 +132,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # TiledCamera needs real cloned USD prims, not Fabric-only clones.
     env_cfg.scene.clone_in_fabric = False
+    # Pull the viewer closer for recorded perspective videos when viewer settings are available.
+    if hasattr(env_cfg, "viewer") and env_cfg.viewer is not None:
+        if hasattr(env_cfg.viewer, "eye"):
+            env_cfg.viewer.eye = (1.8, 1.2, 1.1)
+        if hasattr(env_cfg.viewer, "lookat"):
+            env_cfg.viewer.lookat = (0.0, 0.0, 0.25)
 
     checkpoint_path = os.path.abspath(args_cli.checkpoint)
     if not os.path.exists(checkpoint_path):
@@ -148,9 +154,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         raise RuntimeError("Visuomotor environment did not create a wrist camera. Camera input is required for BC.")
 
     max_assessment_steps = None
+    effective_video_length = args_cli.video_length
     if args_cli.num_loops > 0:
         steps_per_loop = max(base_env.max_episode_length - 1, 1)
         max_assessment_steps = args_cli.num_loops * steps_per_loop
+        if args_cli.video:
+            effective_video_length = max_assessment_steps
         print(
             f"[INFO] Assessment will stop after {args_cli.num_loops} loop(s): "
             f"{max_assessment_steps} steps ({steps_per_loop} steps per loop)."
@@ -160,7 +169,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         video_kwargs = {
             "video_folder": os.path.join(os.path.dirname(checkpoint_path), "videos", "offline_bc_assess"),
             "step_trigger": lambda step: step == 0,
-            "video_length": args_cli.video_length,
+            "video_length": effective_video_length,
             "disable_logger": True,
         }
         print("[INFO] Recording videos during assessment.")
