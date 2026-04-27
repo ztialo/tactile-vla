@@ -16,6 +16,7 @@ from pathlib import Path
 from isaaclab.app import AppLauncher
 
 # local imports
+sys.path.append(os.path.join(os.path.dirname(__file__), "rsl_rl"))
 import cli_args  # isort: skip
 
 # add argparse arguments
@@ -96,6 +97,8 @@ class OfflineBCInferencePolicy:
             action_dim=action_dim,
             image_embed_dim=config["image_embed_dim"],
             hidden_dims=config["hidden_dims"],
+            encoder_type=config.get("encoder_type", "custom_cnn"),
+            freeze_encoder=config.get("freeze_encoder", False),
         ).to(device)
         self.model.load_state_dict(checkpoint["model"])
         self.model.eval()

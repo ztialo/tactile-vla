@@ -18,6 +18,7 @@ import h5py
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -35,6 +36,18 @@ def parse_args():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--max_train_samples", type=int, default=0, help="Optional cap on training samples. 0 means all.")
     parser.add_argument("--max_val_samples", type=int, default=0, help="Optional cap on validation samples. 0 means all.")
+    parser.add_argument(
+        "--encoder_type",
+        type=str,
+        default="custom_cnn",
+        choices=["custom_cnn", "r3m_resnet18"],
+        help="Visual encoder backend.",
+    )
+    parser.add_argument(
+        "--freeze_encoder",
+        action="store_true",
+        help="Freeze the visual encoder and train only the projection/head.",
+    )
     parser.add_argument("--image_embed_dim", type=int, default=256)
     parser.add_argument("--hidden_dims", type=int, nargs="+", default=[512, 256, 128])
     parser.add_argument("--log_interval", type=int, default=100, help="Print training progress every N batches. 0 disables.")
@@ -100,20 +113,55 @@ class H5VisionActionDataset(Dataset):
 
 
 class VisionBCPolicy(nn.Module):
-    def __init__(self, proprio_dim: int, action_dim: int, image_embed_dim: int, hidden_dims: list[int]):
+    IMAGENET_MEAN = (0.485, 0.456, 0.406)
+    IMAGENET_STD = (0.229, 0.224, 0.225)
+
+    def __init__(
+        self,
+        proprio_dim: int,
+        action_dim: int,
+        image_embed_dim: int,
+        hidden_dims: list[int],
+        encoder_type: str = "custom_cnn",
+        freeze_encoder: bool = False,
+    ):
         super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=8, stride=4),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten(),
-            nn.Linear(64, image_embed_dim),
+        self.encoder_type = encoder_type
+        self.freeze_encoder = freeze_encoder
+
+        if encoder_type == "custom_cnn":
+            self.encoder = nn.Sequential(
+                nn.Conv2d(3, 32, kernel_size=8, stride=4),
+                nn.ReLU(),
+                nn.Conv2d(32, 64, kernel_size=4, stride=2),
+                nn.ReLU(),
+                nn.Conv2d(64, 64, kernel_size=3, stride=1),
+                nn.ReLU(),
+                nn.AdaptiveAvgPool2d((1, 1)),
+                nn.Flatten(),
+            )
+            encoder_output_dim = 64
+        elif encoder_type == "r3m_resnet18":
+            try:
+                from r3m import load_r3m
+            except ImportError as exc:
+                raise ImportError(
+                    "install r3m packages inside the current environment"
+                    "Install in current environment before using --encoder_type r3m_resnet18."
+                ) from exc
+            self.encoder = load_r3m("resnet18")
+            encoder_output_dim = 512
+        else:
+            raise ValueError(f"Unsupported encoder_type: {encoder_type}")
+
+        self.image_proj = nn.Sequential(
+            nn.Linear(encoder_output_dim, image_embed_dim),
             nn.ReLU(),
         )
+
+        if freeze_encoder:
+            for param in self.encoder.parameters():
+                param.requires_grad = False
 
         layers: list[nn.Module] = []
         mlp_input_dim = image_embed_dim + proprio_dim
@@ -124,9 +172,28 @@ class VisionBCPolicy(nn.Module):
         layers.append(nn.Linear(prev_dim, action_dim))
         self.policy_head = nn.Sequential(*layers)
 
-    def forward(self, image: torch.Tensor, proprio: torch.Tensor) -> torch.Tensor:
+    def encode_image(self, image: torch.Tensor) -> torch.Tensor:
         image = image.permute(0, 3, 1, 2).contiguous()
-        image_embedding = self.encoder(image)
+
+        if self.encoder_type == "custom_cnn":
+            features = self.encoder(image)
+        elif self.encoder_type == "r3m_resnet18":
+            image = F.interpolate(image, size=(224, 224), mode="bilinear", align_corners=False)
+            mean = torch.tensor(self.IMAGENET_MEAN, dtype=image.dtype, device=image.device).view(1, 3, 1, 1)
+            std = torch.tensor(self.IMAGENET_STD, dtype=image.dtype, device=image.device).view(1, 3, 1, 1)
+            image = (image - mean) / std
+            if self.freeze_encoder:
+                with torch.no_grad():
+                    features = self.encoder(image)
+            else:
+                features = self.encoder(image)
+        else:
+            raise ValueError(f"Unsupported encoder_type: {self.encoder_type}")
+
+        return self.image_proj(features)
+
+    def forward(self, image: torch.Tensor, proprio: torch.Tensor) -> torch.Tensor:
+        image_embedding = self.encode_image(image)
         return self.policy_head(torch.cat((image_embedding, proprio), dim=-1))
 
 
@@ -273,10 +340,23 @@ def main():
 
     device = torch.device(args.device)
     print(f"[INFO] Using device: {device}")
-    model = VisionBCPolicy(proprio_dim, action_dim, args.image_embed_dim, args.hidden_dims).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    model = VisionBCPolicy(
+        proprio_dim,
+        action_dim,
+        args.image_embed_dim,
+        args.hidden_dims,
+        encoder_type=args.encoder_type,
+        freeze_encoder=args.freeze_encoder,
+    ).to(device)
+    trainable_params = [param for param in model.parameters() if param.requires_grad]
+    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
     loss_fn = nn.SmoothL1Loss()
-    print("[INFO] Model and optimizer initialized.")
+    num_trainable_params = sum(param.numel() for param in trainable_params)
+    print(
+        f"[INFO] Model and optimizer initialized. "
+        f"encoder_type={args.encoder_type}, freeze_encoder={args.freeze_encoder}, "
+        f"trainable_params={num_trainable_params}"
+    )
 
     best_val_loss = float("inf")
     history = []
