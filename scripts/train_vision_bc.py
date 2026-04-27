@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import random
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -36,6 +37,7 @@ def parse_args():
     parser.add_argument("--max_val_samples", type=int, default=0, help="Optional cap on validation samples. 0 means all.")
     parser.add_argument("--image_embed_dim", type=int, default=256)
     parser.add_argument("--hidden_dims", type=int, nargs="+", default=[512, 256, 128])
+    parser.add_argument("--log_interval", type=int, default=100, help="Print training progress every N batches. 0 disables.")
     return parser.parse_args()
 
 
@@ -44,6 +46,13 @@ def set_seed(seed: int):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+def _format_duration(seconds: float) -> str:
+    total_seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
 @dataclass
@@ -136,17 +145,21 @@ def build_split_indices(
     max_train_samples: int,
     max_val_samples: int,
 ):
+    print(f"[INFO] Opening dataset: {h5_path}")
     with h5py.File(h5_path, "r") as h5_file:
         required = ["wrist_rgb", "joint_pos", "gripper_pos", "prev_action", "action"]
         missing = [name for name in required if name not in h5_file]
         if missing:
             raise KeyError(f"Dataset is missing required keys: {missing}")
+        print(f"[INFO] Found keys: {sorted(h5_file.keys())}")
+        print(f"[INFO] Total samples in H5: {len(h5_file['action'])}")
 
         episode_keys = _episode_keys(h5_file)
         unique_keys, inverse = np.unique(episode_keys, axis=0, return_inverse=True)
         episode_ids = np.arange(len(unique_keys))
         rng = np.random.default_rng(seed)
         rng.shuffle(episode_ids)
+        print(f"[INFO] Unique episode keys: {len(unique_keys)}")
 
         num_val_episodes = max(1, int(round(len(episode_ids) * val_split)))
         val_episode_ids = set(episode_ids[:num_val_episodes].tolist())
@@ -158,6 +171,12 @@ def build_split_indices(
             train_indices = rng.choice(train_indices, size=max_train_samples, replace=False)
         if max_val_samples > 0 and len(val_indices) > max_val_samples:
             val_indices = rng.choice(val_indices, size=max_val_samples, replace=False)
+        # h5py fancy indexing requires strictly increasing indices.
+        train_indices = np.sort(train_indices)
+        val_indices = np.sort(val_indices)
+        print(f"[INFO] Train samples after cap: {len(train_indices)}")
+        print(f"[INFO] Val samples after cap: {len(val_indices)}")
+        print("[INFO] Computing dataset normalization statistics from train split...")
 
         joint_pos = np.asarray(h5_file["joint_pos"][train_indices], dtype=np.float32)
         gripper_pos = np.asarray(h5_file["gripper_pos"][train_indices], dtype=np.float32)
@@ -205,9 +224,12 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, loss_fn
 def main():
     args = parse_args()
     set_seed(args.seed)
+    run_start_time = time.time()
+    print(f"[INFO] Starting offline BC training with seed={args.seed}")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[INFO] Output directory: {output_dir}")
 
     train_indices, val_indices, stats, proprio_dim, action_dim = build_split_indices(
         args.dataset,
@@ -216,6 +238,8 @@ def main():
         args.max_train_samples,
         args.max_val_samples,
     )
+    print(f"[INFO] Proprio dim: {proprio_dim}")
+    print(f"[INFO] Action dim: {action_dim}")
 
     train_dataset = H5VisionActionDataset(
         args.dataset,
@@ -244,11 +268,15 @@ def main():
         num_workers=args.num_workers,
         pin_memory=torch.cuda.is_available(),
     )
+    print(f"[INFO] Train batches per epoch: {len(train_loader)}")
+    print(f"[INFO] Val batches per epoch: {len(val_loader)}")
 
     device = torch.device(args.device)
+    print(f"[INFO] Using device: {device}")
     model = VisionBCPolicy(proprio_dim, action_dim, args.image_embed_dim, args.hidden_dims).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loss_fn = nn.SmoothL1Loss()
+    print("[INFO] Model and optimizer initialized.")
 
     best_val_loss = float("inf")
     history = []
@@ -262,8 +290,10 @@ def main():
         model.train()
         running_loss = 0.0
         seen = 0
+        epoch_start_time = time.time()
+        print(f"[INFO] Epoch {epoch}/{args.epochs} started.")
 
-        for batch in train_loader:
+        for batch_idx, batch in enumerate(train_loader, start=1):
             image = batch["image"].to(device)
             proprio = batch["proprio"].to(device)
             action = batch["action"].to(device)
@@ -277,14 +307,35 @@ def main():
             running_loss += loss.item() * image.shape[0]
             seen += image.shape[0]
 
+            if args.log_interval > 0 and (batch_idx % args.log_interval == 0 or batch_idx == len(train_loader)):
+                epoch_elapsed = time.time() - epoch_start_time
+                avg_batch_time = epoch_elapsed / batch_idx
+                remaining_batches = len(train_loader) - batch_idx
+                epoch_eta = avg_batch_time * remaining_batches
+                epoch_pct = 100.0 * batch_idx / max(len(train_loader), 1)
+                print(
+                    f"[INFO] Epoch {epoch}/{args.epochs} | "
+                    f"batch {batch_idx}/{len(train_loader)} ({epoch_pct:.1f}%) | "
+                    f"train_loss={loss.item():.6f} | "
+                    f"elapsed={_format_duration(epoch_elapsed)} | "
+                    f"eta={_format_duration(epoch_eta)}"
+                )
+
         train_loss = running_loss / max(seen, 1)
         val_loss = evaluate(model, val_loader, device, loss_fn)
         history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
+        epoch_elapsed = time.time() - epoch_start_time
+        total_elapsed = time.time() - run_start_time
+        avg_epoch_time = total_elapsed / epoch
+        total_eta = avg_epoch_time * (args.epochs - epoch)
 
         print(
             f"[Epoch {epoch:03d}] "
             f"train_loss={train_loss:.6f} "
-            f"val_loss={val_loss:.6f}"
+            f"val_loss={val_loss:.6f} "
+            f"epoch_time={_format_duration(epoch_elapsed)} "
+            f"total_elapsed={_format_duration(total_elapsed)} "
+            f"eta={_format_duration(total_eta)}"
         )
 
         checkpoint = {
