@@ -135,6 +135,44 @@ def _initialize_distillation_student_from_offline_bc(runner, checkpoint_path: st
     print(f"[INFO] Initialized distillation student MLP from offline BC checkpoint: {checkpoint_path}")
 
 
+def _initialize_actor_from_offline_bc(runner, checkpoint_path: str):
+    """Copy the offline BC MLP head into the PPO actor MLP."""
+    checkpoint = torch.load(checkpoint_path, map_location=runner.device)
+    bc_state_dict = checkpoint["model"]
+    if hasattr(runner.alg, "actor_critic"):
+        actor_module = runner.alg.actor_critic.actor
+    elif hasattr(runner.alg, "policy"):
+        actor_module = runner.alg.policy.actor
+    else:
+        raise AttributeError("Could not find PPO actor module on runner.alg (expected actor_critic or policy).")
+
+    actor_state_dict = actor_module.state_dict()
+
+    remapped = {}
+    missing_bc_keys = []
+    for actor_key in actor_state_dict.keys():
+        bc_key = f"policy_head.{actor_key}"
+        if bc_key not in bc_state_dict:
+            missing_bc_keys.append(bc_key)
+            continue
+        if bc_state_dict[bc_key].shape != actor_state_dict[actor_key].shape:
+            raise ValueError(
+                f"Offline BC weight shape mismatch for {bc_key}: "
+                f"{tuple(bc_state_dict[bc_key].shape)} vs actor {actor_key}: {tuple(actor_state_dict[actor_key].shape)}"
+            )
+        remapped[actor_key] = bc_state_dict[bc_key]
+
+    if missing_bc_keys:
+        raise KeyError(
+            "Offline BC checkpoint does not match the PPO actor MLP structure. "
+            f"Missing keys: {missing_bc_keys}"
+        )
+
+    actor_state_dict.update(remapped)
+    actor_module.load_state_dict(actor_state_dict)
+    print(f"[INFO] Initialized PPO actor MLP from offline BC checkpoint: {checkpoint_path}")
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Train with RSL-RL agent."""
@@ -243,6 +281,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner.load(resume_path)
     if agent_cfg.algorithm.class_name == "Distillation" and getattr(agent_cfg, "student_init_checkpoint", ""):
         _initialize_distillation_student_from_offline_bc(runner, agent_cfg.student_init_checkpoint)
+    elif agent_cfg.class_name == "OnPolicyRunner" and getattr(agent_cfg, "student_init_checkpoint", ""):
+        _initialize_actor_from_offline_bc(runner, agent_cfg.student_init_checkpoint)
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
