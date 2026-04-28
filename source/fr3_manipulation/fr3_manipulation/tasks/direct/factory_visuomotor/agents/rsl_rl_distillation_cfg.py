@@ -8,7 +8,7 @@ from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import (
     RslRlDistillationAlgorithmCfg,
     RslRlDistillationRunnerCfg,
-    RslRlMLPModelCfg,
+    RslRlDistillationStudentTeacherCfg,
 )
 
 
@@ -20,19 +20,19 @@ class FactoryVisuomotorDistillationRunnerCfg(RslRlDistillationRunnerCfg):
     experiment_name = "factory_privileged"
     run_name = "visuomotor_distillation"
 
-    obs_groups = {"student": ["policy"], "teacher": ["critic"]}
+    # The distillation runner expects the student obs group under "policy" and the teacher obs group under "teacher".
+    obs_groups = {"policy": ["policy"], "teacher": ["critic"]}
 
-    student = RslRlMLPModelCfg(
-        hidden_dims=[512, 256, 128],
+    # Offline BC initialization checkpoint for the student MLP head. The train script copies this into the student.
+    student_init_checkpoint: str = ""
+
+    policy = RslRlDistillationStudentTeacherCfg(
+        init_noise_std=1.0,
+        student_obs_normalization=False,
+        teacher_obs_normalization=True,
+        student_hidden_dims=[512, 256, 128],
+        teacher_hidden_dims=[512, 128, 64],
         activation="elu",
-        obs_normalization=True,
-        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=1.0),
-    )
-    teacher = RslRlMLPModelCfg(
-        hidden_dims=[512, 128, 64],
-        activation="elu",
-        obs_normalization=True,
-        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=0.0),
     )
 
     algorithm = RslRlDistillationAlgorithmCfg(

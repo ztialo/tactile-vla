@@ -7,11 +7,9 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import time
-from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
@@ -23,6 +21,13 @@ import cli_args  # isort: skip
 parser = argparse.ArgumentParser(description="Assess an offline BC policy in Isaac Lab.")
 parser.add_argument("--checkpoint", type=str, required=True, help="Path to offline BC checkpoint (*.pt).")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during assessment.")
+parser.add_argument(
+    "--video_src",
+    type=str,
+    default="pov",
+    choices=["pov", "zed"],
+    help="Video source: `pov` records the viewer perspective, `zed` records the wrist camera stream.",
+)
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument(
     "--num_loops",
@@ -51,8 +56,9 @@ simulation_app = app_launcher.app
 """Rest everything follows."""
 
 import gymnasium as gym
-import numpy as np
 import torch
+import imageio.v2 as imageio
+import numpy as np
 
 from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg, DirectRLEnvCfg, ManagerBasedRLEnvCfg, multi_agent_to_single_agent
 from isaaclab.utils.dict import print_dict
@@ -82,6 +88,29 @@ def _get_episode_success_rate(env):
     if not hasattr(env, "ep_succeeded"):
         return None
     return torch.count_nonzero(env.ep_succeeded).float() / env.num_envs
+
+
+def _to_uint8_rgb(frame: torch.Tensor):
+    frame = frame.detach().cpu()
+    if frame.dtype != torch.uint8:
+        frame = torch.clamp(frame, 0, 255).to(torch.uint8)
+    return frame.numpy()
+
+
+def _make_zed_grid(rgb_batch: torch.Tensor):
+    """Tile up to 10 env wrist images into a 2x5 grid."""
+    frames = [_to_uint8_rgb(rgb_batch[i, ..., :3]) for i in range(min(rgb_batch.shape[0], 10))]
+    if not frames:
+        raise RuntimeError("No wrist camera frames available for ZED video recording.")
+
+    frame_h, frame_w, frame_c = frames[0].shape
+    blank = torch.zeros((frame_h, frame_w, frame_c), dtype=torch.uint8).numpy()
+    while len(frames) < 10:
+        frames.append(blank.copy())
+
+    top = frames[0:5]
+    bottom = frames[5:10]
+    return np.concatenate((np.concatenate(top, axis=1), np.concatenate(bottom, axis=1)), axis=0)
 
 
 class OfflineBCInferencePolicy:
@@ -119,7 +148,7 @@ class OfflineBCInferencePolicy:
         return self.model(camera_rgb, proprio)
 
 
-@hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
+@hydra_task_config(args_cli.task, None)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg):
     del agent_cfg
 
@@ -166,16 +195,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         )
 
     if args_cli.video:
-        video_kwargs = {
-            "video_folder": os.path.join(os.path.dirname(checkpoint_path), "videos", "offline_bc_assess"),
-            "step_trigger": lambda step: step == 0,
-            "video_length": effective_video_length,
-            "disable_logger": True,
-        }
-        print("[INFO] Recording videos during assessment.")
-        print_dict(video_kwargs, nesting=4)
-        env = gym.wrappers.RecordVideo(env, **video_kwargs)
-        base_env = env.unwrapped
+        if args_cli.video_src == "pov":
+            video_kwargs = {
+                "video_folder": os.path.join(os.path.dirname(checkpoint_path), "videos", "offline_bc_assess"),
+                "step_trigger": lambda step: step == 0,
+                "video_length": effective_video_length,
+                "disable_logger": True,
+            }
+            print("[INFO] Recording POV videos during assessment.")
+            print_dict(video_kwargs, nesting=4)
+            env = gym.wrappers.RecordVideo(env, **video_kwargs)
+            base_env = env.unwrapped
+        else:
+            zed_video_dir = os.path.join(os.path.dirname(checkpoint_path), "videos", "offline_bc_assess_zed")
+            os.makedirs(zed_video_dir, exist_ok=True)
+            zed_video_path = os.path.join(zed_video_dir, f"{args_cli.task.replace(':', '_')}.mp4")
+            print(f"[INFO] Recording ZED wrist video to: {zed_video_path}")
+            zed_writer = imageio.get_writer(zed_video_path, fps=max(int(round(1.0 / base_env.step_dt)), 1))
+    else:
+        zed_writer = None
 
     device = torch.device(args_cli.device or env_cfg.sim.device)
     policy = OfflineBCInferencePolicy(checkpoint_path, device)
@@ -192,6 +230,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             actions = policy.act(base_env)
             _, _, terminated, truncated, extras = env.step(actions)
             dones = torch.logical_or(terminated, truncated)
+            if zed_writer is not None:
+                zed_batch = base_env._wrist_camera.data.output["rgb"]
+                zed_writer.append_data(_make_zed_grid(zed_batch))
 
             if len(dones) > 0 and torch.all(dones).item():
                 completed_loops += 1
@@ -227,6 +268,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if loop_success_rates:
         mean_success_rate = torch.stack(loop_success_rates).mean()
         print(f"[INFO] Mean episode success rate over {len(loop_success_rates)} loop(s): {_to_float(mean_success_rate):.4f}")
+
+    if zed_writer is not None:
+        zed_writer.close()
 
     env.close()
 

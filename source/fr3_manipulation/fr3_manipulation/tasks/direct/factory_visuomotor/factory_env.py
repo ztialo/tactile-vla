@@ -6,6 +6,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import carb
 import isaacsim.core.utils.torch as torch_utils
@@ -22,32 +23,146 @@ from . import factory_control, factory_utils
 from .factory_env_cfg import IMAGE_EMBED_DIM, PREV_ACTION_DIM, STATE_DIM_CFG, FactoryEnvCfg
 
 
-class FrozenWristRgbEncoder(nn.Module):
-    """Small frozen      that maps wrist RGB images to a fixed-size embedding."""
+class FrozenVisionEncoder(nn.Module):
+    """Frozen image encoder and proprio normalizer loaded from an offline BC checkpoint when available."""
 
-    def __init__(self, embedding_dim: int):
+    IMAGENET_MEAN = (0.485, 0.456, 0.406)
+    IMAGENET_STD = (0.229, 0.224, 0.225)
+
+    def __init__(self, embedding_dim: int, checkpoint_path: str = ""):
         super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=8, stride=4),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten(),
-            nn.Linear(64, embedding_dim),
-            nn.ReLU(),
-        )
-        # Freeze the encoder
+        self.encoder_type = "custom_cnn"
+        self.proprio_mean = None
+        self.proprio_std = None
+
+        if checkpoint_path:
+            checkpoint = torch.load(checkpoint_path, map_location="cpu")
+            model_state = checkpoint["model"]
+            config = checkpoint["config"]
+            stats = checkpoint["stats"]
+            self.encoder_type = config.get("encoder_type", "custom_cnn")
+            checkpoint_embed_dim = config["image_embed_dim"]
+
+            if self.encoder_type == "custom_cnn":
+                self.encoder = nn.Sequential(
+                    nn.Conv2d(3, 32, kernel_size=8, stride=4),
+                    nn.ReLU(),
+                    nn.Conv2d(32, 64, kernel_size=4, stride=2),
+                    nn.ReLU(),
+                    nn.Conv2d(64, 64, kernel_size=3, stride=1),
+                    nn.ReLU(),
+                    nn.AdaptiveAvgPool2d((1, 1)),
+                    nn.Flatten(),
+                )
+                encoder_output_dim = 64
+            elif self.encoder_type == "r3m_resnet18":
+                try:
+                    from r3m import load_r3m
+                except ImportError as exc:
+                    raise ImportError(
+                        "The visuomotor env requested an offline BC checkpoint with encoder_type='r3m_resnet18', "
+                        "but the `r3m` package is not installed."
+                    ) from exc
+                self.encoder = load_r3m("resnet18")
+                encoder_output_dim = 512
+            else:
+                raise ValueError(f"Unsupported offline BC encoder type: {self.encoder_type}")
+
+            self.image_proj = nn.Sequential(
+                nn.Linear(encoder_output_dim, checkpoint_embed_dim),
+                nn.ReLU(),
+            )
+
+            self._load_from_offline_bc_state(model_state)
+            self.proprio_mean = torch.tensor(stats["proprio_mean"], dtype=torch.float32)
+            self.proprio_std = torch.tensor(stats["proprio_std"], dtype=torch.float32)
+            if checkpoint_embed_dim != embedding_dim:
+                raise ValueError(
+                    f"Offline BC checkpoint image_embed_dim={checkpoint_embed_dim} does not match env embedding_dim={embedding_dim}."
+                )
+        else:
+            self.encoder = nn.Sequential(
+                nn.Conv2d(3, 32, kernel_size=8, stride=4),
+                nn.ReLU(),
+                nn.Conv2d(32, 64, kernel_size=4, stride=2),
+                nn.ReLU(),
+                nn.Conv2d(64, 64, kernel_size=3, stride=1),
+                nn.ReLU(),
+                nn.AdaptiveAvgPool2d((1, 1)),
+                nn.Flatten(),
+                nn.Linear(64, embedding_dim),
+                nn.ReLU(),
+            )
+            self.image_proj = None
+
         for param in self.parameters():
             param.requires_grad = False
         self.eval()
 
+    def _load_from_offline_bc_state(self, model_state):
+        if self.encoder_type == "custom_cnn":
+            encoder_state = {}
+            for key, value in model_state.items():
+                if key.startswith("encoder."):
+                    sub_key = key.replace("encoder.", "", 1)
+                    if sub_key in self.encoder.state_dict():
+                        encoder_state[sub_key] = value
+            self.encoder.load_state_dict(encoder_state, strict=False)
+
+            if "image_proj.0.weight" in model_state:
+                self.image_proj.load_state_dict(
+                    {
+                        "0.weight": model_state["image_proj.0.weight"],
+                        "0.bias": model_state["image_proj.0.bias"],
+                    }
+                )
+            elif "encoder.8.weight" in model_state:
+                self.image_proj.load_state_dict(
+                    {
+                        "0.weight": model_state["encoder.8.weight"],
+                        "0.bias": model_state["encoder.8.bias"],
+                    }
+                )
+            else:
+                raise KeyError("Offline BC checkpoint does not contain a compatible custom CNN projection layer.")
+        elif self.encoder_type == "r3m_resnet18":
+            self.encoder.load_state_dict(
+                {key.replace("encoder.", "", 1): value for key, value in model_state.items() if key.startswith("encoder.")}
+            )
+            self.image_proj.load_state_dict(
+                {
+                    "0.weight": model_state["image_proj.0.weight"],
+                    "0.bias": model_state["image_proj.0.bias"],
+                }
+            )
+        else:
+            raise ValueError(f"Unsupported encoder type: {self.encoder_type}")
+
+    def normalize_proprio(self, proprio: torch.Tensor) -> torch.Tensor:
+        if self.proprio_mean is None or self.proprio_std is None:
+            return proprio
+        mean = self.proprio_mean.to(device=proprio.device, dtype=proprio.dtype)
+        std = self.proprio_std.to(device=proprio.device, dtype=proprio.dtype)
+        if mean.shape[0] != proprio.shape[-1]:
+            raise ValueError(
+                f"Offline BC proprio stats dim {mean.shape[0]} does not match env proprio dim {proprio.shape[-1]}."
+            )
+        return (proprio - mean) / std
+
     @torch.no_grad()
     def forward(self, rgb):
         rgb = rgb.permute(0, 3, 1, 2).contiguous()
-        return self.encoder(rgb)
+        if self.encoder_type == "r3m_resnet18":
+            rgb = F.interpolate(rgb, size=(224, 224), mode="bilinear", align_corners=False)
+            mean = torch.tensor(self.IMAGENET_MEAN, dtype=rgb.dtype, device=rgb.device).view(1, 3, 1, 1)
+            std = torch.tensor(self.IMAGENET_STD, dtype=rgb.dtype, device=rgb.device).view(1, 3, 1, 1)
+            rgb = (rgb - mean) / std
+            features = self.encoder(rgb)
+            return self.image_proj(features)
+        if self.image_proj is None:
+            return self.encoder(rgb)
+        features = self.encoder[:-2](rgb)
+        return self.image_proj(features)
 
 
 class FactoryEnv(DirectRLEnv):
@@ -61,7 +176,7 @@ class FactoryEnv(DirectRLEnv):
 
         super().__init__(cfg, render_mode, **kwargs)
 
-        self._wrist_rgb_encoder = FrozenWristRgbEncoder(IMAGE_EMBED_DIM).to(self.device)
+        self._wrist_rgb_encoder = FrozenVisionEncoder(IMAGE_EMBED_DIM, self.cfg.offline_bc_checkpoint).to(self.device)
         factory_utils.set_body_inertias(self._robot, self.scene.num_envs)
         self._init_tensors()
         self._set_default_dynamics_parameters()
@@ -226,6 +341,7 @@ class FactoryEnv(DirectRLEnv):
 
         gripper_pos = torch.mean(self.joint_pos[:, 7:], dim=1, keepdim=True)
         proprio = torch.cat((self.joint_pos[:, 0:7], gripper_pos, self.prev_action_obs), dim=-1)
+        proprio = self._wrist_rgb_encoder.normalize_proprio(proprio)
         if self._wrist_camera is not None:
             camera_rgb = self._wrist_camera.data.output["rgb"][..., :3].float() / 255.0
             image_embedding = self._wrist_rgb_encoder(camera_rgb)

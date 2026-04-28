@@ -91,6 +91,7 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     task: FactoryTask = FactoryTask()
     obs_rand: ObsRandCfg = ObsRandCfg()
     ctrl: CtrlCfg = CtrlCfg()
+    offline_bc_checkpoint: str = ""
 
     episode_length_s = 10.0  # Probably need to override.
     sim: SimulationCfg = SimulationCfg(

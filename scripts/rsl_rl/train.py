@@ -104,6 +104,37 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
 
+def _initialize_distillation_student_from_offline_bc(runner, checkpoint_path: str):
+    """Copy the offline BC MLP head into the distillation student's MLP."""
+    checkpoint = torch.load(checkpoint_path, map_location=runner.device)
+    bc_state_dict = checkpoint["model"]
+    student_state_dict = runner.alg.policy.student.state_dict()
+
+    remapped = {}
+    missing_bc_keys = []
+    for student_key in student_state_dict.keys():
+        bc_key = f"policy_head.{student_key}"
+        if bc_key not in bc_state_dict:
+            missing_bc_keys.append(bc_key)
+            continue
+        if bc_state_dict[bc_key].shape != student_state_dict[student_key].shape:
+            raise ValueError(
+                f"Offline BC weight shape mismatch for {bc_key}: "
+                f"{tuple(bc_state_dict[bc_key].shape)} vs student {student_key}: {tuple(student_state_dict[student_key].shape)}"
+            )
+        remapped[student_key] = bc_state_dict[bc_key]
+
+    if missing_bc_keys:
+        raise KeyError(
+            "Offline BC checkpoint does not match the distillation student MLP structure. "
+            f"Missing keys: {missing_bc_keys}"
+        )
+
+    student_state_dict.update(remapped)
+    runner.alg.policy.student.load_state_dict(student_state_dict)
+    print(f"[INFO] Initialized distillation student MLP from offline BC checkpoint: {checkpoint_path}")
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Train with RSL-RL agent."""
@@ -155,6 +186,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
+    if hasattr(agent_cfg, "student_init_checkpoint") and getattr(agent_cfg, "student_init_checkpoint", ""):
+        if hasattr(env_cfg, "offline_bc_checkpoint"):
+            env_cfg.offline_bc_checkpoint = agent_cfg.student_init_checkpoint
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -196,6 +230,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         # load previously trained model
         runner.load(resume_path)
+    if agent_cfg.algorithm.class_name == "Distillation" and getattr(agent_cfg, "student_init_checkpoint", ""):
+        _initialize_distillation_student_from_offline_bc(runner, agent_cfg.student_init_checkpoint)
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
