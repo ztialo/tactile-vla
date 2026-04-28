@@ -142,6 +142,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
+    # TiledCamera sensors need real cloned USD prims. Fabric-only cloning breaks multi-env camera indexing.
+    if hasattr(env_cfg, "wrist_camera") and getattr(env_cfg, "wrist_camera", None) is not None:
+        env_cfg.scene.clone_in_fabric = False
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)

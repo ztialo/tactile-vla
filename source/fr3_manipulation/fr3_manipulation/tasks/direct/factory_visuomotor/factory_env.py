@@ -349,7 +349,18 @@ class FactoryEnv(DirectRLEnv):
             image_embedding = torch.zeros((self.num_envs, IMAGE_EMBED_DIM), device=self.device)
         obs_tensors = torch.cat((image_embedding, proprio), dim=-1)
         state_tensors = factory_utils.collapse_obs_dict(state_dict, self.cfg.state_order + ["prev_actions"])
-        return {"policy": obs_tensors, "critic": state_tensors}
+        noisy_fixed_pos = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
+        teacher_policy_tensors = torch.cat(
+            (
+                self.fingertip_midpoint_pos - noisy_fixed_pos,
+                self.fingertip_midpoint_quat,
+                self.ee_linvel_fd,
+                self.ee_angvel_fd,
+                self.actions.clone(),
+            ),
+            dim=-1,
+        )
+        return {"policy": obs_tensors, "critic": state_tensors, "teacher_policy": teacher_policy_tensors}
 
     def _reset_buffers(self, env_ids):
         """Reset buffers."""

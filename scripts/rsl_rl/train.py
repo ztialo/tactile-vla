@@ -167,7 +167,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         agent_cfg.seed = seed
 
     # specify directory for logging experiments
-    log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
+    if hasattr(agent_cfg, "output_root_dir") and getattr(agent_cfg, "output_root_dir", ""):
+        log_root_path = os.path.abspath(agent_cfg.output_root_dir)
+    else:
+        log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
     # specify directory for logging runs: {time-stamp}_{run_name}
@@ -189,6 +192,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if hasattr(agent_cfg, "student_init_checkpoint") and getattr(agent_cfg, "student_init_checkpoint", ""):
         if hasattr(env_cfg, "offline_bc_checkpoint"):
             env_cfg.offline_bc_checkpoint = agent_cfg.student_init_checkpoint
+    # TiledCamera sensors need real cloned USD prims. Fabric-only cloning breaks multi-env camera indexing.
+    if hasattr(env_cfg, "wrist_camera") and getattr(env_cfg, "wrist_camera", None) is not None:
+        env_cfg.scene.clone_in_fabric = False
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -199,7 +205,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # save resume path before creating a new log_dir
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
-        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+        if agent_cfg.algorithm.class_name == "Distillation" and hasattr(agent_cfg, "teacher_checkpoint_path") and getattr(
+            agent_cfg, "teacher_checkpoint_path", ""
+        ):
+            resume_path = os.path.abspath(agent_cfg.teacher_checkpoint_path)
+        else:
+            resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
     # wrap for video recording
     if args_cli.video:

@@ -17,11 +17,13 @@ class FactoryVisuomotorDistillationRunnerCfg(RslRlDistillationRunnerCfg):
     num_steps_per_env = 128
     max_iterations = 200
     save_interval = 50
-    experiment_name = "factory_privileged"
+    experiment_name = "factory_visuomotor"
     run_name = "visuomotor_distillation"
+    output_root_dir: str = "logs/rsl_rl/factory_visuomotor"
+    teacher_checkpoint_path: str = ""
 
-    # The distillation runner expects the student obs group under "policy" and the teacher obs group under "teacher".
-    obs_groups = {"policy": ["policy"], "teacher": ["critic"]}
+    # Student acts on visuomotor obs; distillation teacher acts on the privileged teacher actor obs.
+    obs_groups = {"policy": ["policy"], "teacher": ["teacher_policy"]}
 
     # Offline BC initialization checkpoint for the student MLP head. The train script copies this into the student.
     student_init_checkpoint: str = ""
