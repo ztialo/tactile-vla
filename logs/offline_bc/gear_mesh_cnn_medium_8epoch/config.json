@@ -1,0 +1,21 @@
+{
+  "dataset": "logs/vision_rollouts/gear_mesh_teacher_10000steps.h5",
+  "output_dir": "logs/offline_bc/gear_mesh_cnn_medium",
+  "epochs": 20,
+  "batch_size": 64,
+  "lr": 0.0003,
+  "weight_decay": 0.0001,
+  "val_split": 0.1,
+  "seed": 42,
+  "num_workers": 0,
+  "device": "cuda",
+  "max_train_samples": 200000,
+  "max_val_samples": 20000,
+  "image_embed_dim": 256,
+  "hidden_dims": [
+    512,
+    256,
+    128
+  ],
+  "log_interval": 50
+}

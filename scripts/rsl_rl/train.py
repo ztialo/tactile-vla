@@ -38,7 +38,7 @@ AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
 # always enable cameras to record video
-if args_cli.video:
+if args_cli.video or "Visuomotor" in (args_cli.task or ""):
     args_cli.enable_cameras = True
 
 # clear out sys.argv for Hydra
@@ -104,6 +104,75 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
 
+def _initialize_distillation_student_from_offline_bc(runner, checkpoint_path: str):
+    """Copy the offline BC MLP head into the distillation student's MLP."""
+    checkpoint = torch.load(checkpoint_path, map_location=runner.device)
+    bc_state_dict = checkpoint["model"]
+    student_state_dict = runner.alg.policy.student.state_dict()
+
+    remapped = {}
+    missing_bc_keys = []
+    for student_key in student_state_dict.keys():
+        bc_key = f"policy_head.{student_key}"
+        if bc_key not in bc_state_dict:
+            missing_bc_keys.append(bc_key)
+            continue
+        if bc_state_dict[bc_key].shape != student_state_dict[student_key].shape:
+            raise ValueError(
+                f"Offline BC weight shape mismatch for {bc_key}: "
+                f"{tuple(bc_state_dict[bc_key].shape)} vs student {student_key}: {tuple(student_state_dict[student_key].shape)}"
+            )
+        remapped[student_key] = bc_state_dict[bc_key]
+
+    if missing_bc_keys:
+        raise KeyError(
+            "Offline BC checkpoint does not match the distillation student MLP structure. "
+            f"Missing keys: {missing_bc_keys}"
+        )
+
+    student_state_dict.update(remapped)
+    runner.alg.policy.student.load_state_dict(student_state_dict)
+    print(f"[INFO] Initialized distillation student MLP from offline BC checkpoint: {checkpoint_path}")
+
+
+def _initialize_actor_from_offline_bc(runner, checkpoint_path: str):
+    """Copy the offline BC MLP head into the PPO actor MLP."""
+    checkpoint = torch.load(checkpoint_path, map_location=runner.device)
+    bc_state_dict = checkpoint["model"]
+    if hasattr(runner.alg, "actor_critic"):
+        actor_module = runner.alg.actor_critic.actor
+    elif hasattr(runner.alg, "policy"):
+        actor_module = runner.alg.policy.actor
+    else:
+        raise AttributeError("Could not find PPO actor module on runner.alg (expected actor_critic or policy).")
+
+    actor_state_dict = actor_module.state_dict()
+
+    remapped = {}
+    missing_bc_keys = []
+    for actor_key in actor_state_dict.keys():
+        bc_key = f"policy_head.{actor_key}"
+        if bc_key not in bc_state_dict:
+            missing_bc_keys.append(bc_key)
+            continue
+        if bc_state_dict[bc_key].shape != actor_state_dict[actor_key].shape:
+            raise ValueError(
+                f"Offline BC weight shape mismatch for {bc_key}: "
+                f"{tuple(bc_state_dict[bc_key].shape)} vs actor {actor_key}: {tuple(actor_state_dict[actor_key].shape)}"
+            )
+        remapped[actor_key] = bc_state_dict[bc_key]
+
+    if missing_bc_keys:
+        raise KeyError(
+            "Offline BC checkpoint does not match the PPO actor MLP structure. "
+            f"Missing keys: {missing_bc_keys}"
+        )
+
+    actor_state_dict.update(remapped)
+    actor_module.load_state_dict(actor_state_dict)
+    print(f"[INFO] Initialized PPO actor MLP from offline BC checkpoint: {checkpoint_path}")
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Train with RSL-RL agent."""
@@ -136,7 +205,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         agent_cfg.seed = seed
 
     # specify directory for logging experiments
-    log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
+    if hasattr(agent_cfg, "output_root_dir") and getattr(agent_cfg, "output_root_dir", ""):
+        log_root_path = os.path.abspath(agent_cfg.output_root_dir)
+    else:
+        log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
     # specify directory for logging runs: {time-stamp}_{run_name}
@@ -150,13 +222,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # set the IO descriptors export flag if requested
     if isinstance(env_cfg, ManagerBasedRLEnvCfg):
         env_cfg.export_io_descriptors = args_cli.export_io_descriptors
-    else:
-        omni.log.warn(
-            "IO descriptors are only supported for manager based RL environments. No IO descriptors will be exported."
-        )
+    elif args_cli.export_io_descriptors:
+        print("[WARN] IO descriptors are only supported for manager based RL environments. No IO descriptors exported.")
 
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
+    if hasattr(agent_cfg, "student_init_checkpoint") and getattr(agent_cfg, "student_init_checkpoint", ""):
+        if hasattr(env_cfg, "offline_bc_checkpoint"):
+            env_cfg.offline_bc_checkpoint = agent_cfg.student_init_checkpoint
+    # TiledCamera sensors need real cloned USD prims. Fabric-only cloning breaks multi-env camera indexing.
+    if hasattr(env_cfg, "wrist_camera") and getattr(env_cfg, "wrist_camera", None) is not None:
+        env_cfg.scene.clone_in_fabric = False
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -167,7 +243,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # save resume path before creating a new log_dir
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
-        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+        if agent_cfg.algorithm.class_name == "Distillation" and hasattr(agent_cfg, "teacher_checkpoint_path") and getattr(
+            agent_cfg, "teacher_checkpoint_path", ""
+        ):
+            resume_path = os.path.abspath(agent_cfg.teacher_checkpoint_path)
+        else:
+            resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
     # wrap for video recording
     if args_cli.video:
@@ -198,13 +279,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         # load previously trained model
         runner.load(resume_path)
+    if agent_cfg.algorithm.class_name == "Distillation" and getattr(agent_cfg, "student_init_checkpoint", ""):
+        _initialize_distillation_student_from_offline_bc(runner, agent_cfg.student_init_checkpoint)
+    elif agent_cfg.class_name == "OnPolicyRunner" and getattr(agent_cfg, "student_init_checkpoint", ""):
+        _initialize_actor_from_offline_bc(runner, agent_cfg.student_init_checkpoint)
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
 
     # run training
-    runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
+    runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=False)
 
     # close the simulator
     env.close()
