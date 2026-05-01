@@ -25,6 +25,8 @@ STATE_DIM_CFG = {
     "fingertip_pos": 3,
     "fingertip_pos_rel_fixed": 3,
     "fingertip_quat": 4,
+    "held_quat_rel_fixed": 4,
+    "fingertip_quat_rel_held": 4,
     "ee_linvel": 3,
     "ee_angvel": 3,
     "joint_pos": 7,
@@ -77,6 +79,8 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     state_order: list = [
         "fingertip_pos",
         "fingertip_quat",
+        "held_quat_rel_fixed",
+        "fingertip_quat_rel_held",
         "ee_linvel",
         "ee_angvel",
         "joint_pos",

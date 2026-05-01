@@ -52,6 +52,8 @@ class FactoryTask:
     hand_init_pos_noise: list = [0.02, 0.02, 0.01]
     hand_init_orn: list = [3.1416, 0, 2.356]
     hand_init_orn_noise: list = [0.0, 0.0, 1.57]
+    randomize_hand_init_tilt: bool = False
+    hand_init_tilt_noise_deg: float = 5.0
 
     # Action
     unidirectional_rot: bool = False

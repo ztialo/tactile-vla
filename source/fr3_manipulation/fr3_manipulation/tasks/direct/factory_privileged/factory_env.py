@@ -167,6 +167,10 @@ class FactoryEnv(DirectRLEnv):
     def _get_factory_obs_state_dict(self):
         """Populate dictionaries for the policy and critic."""
         noisy_fixed_pos = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
+        held_quat_rel_fixed = torch_utils.quat_mul(self.held_quat, torch_utils.quat_conjugate(self.fixed_quat))
+        fingertip_quat_rel_held = torch_utils.quat_mul(
+            self.fingertip_midpoint_quat, torch_utils.quat_conjugate(self.held_quat)
+        )
 
         prev_actions = self.actions.clone()
 
@@ -183,6 +187,8 @@ class FactoryEnv(DirectRLEnv):
             "fingertip_pos": self.fingertip_midpoint_pos,
             "fingertip_pos_rel_fixed": self.fingertip_midpoint_pos - self.fixed_pos_obs_frame,
             "fingertip_quat": self.fingertip_midpoint_quat,
+            "held_quat_rel_fixed": held_quat_rel_fixed,
+            "fingertip_quat_rel_held": fingertip_quat_rel_held,
             "ee_linvel": self.fingertip_midpoint_linvel,
             "ee_angvel": self.fingertip_midpoint_angvel,
             "joint_pos": self.joint_pos[:, 0:7],
@@ -716,6 +722,10 @@ class FactoryEnv(DirectRLEnv):
             above_fixed_orn_noise = 2 * (rand_sample - 0.5)  # [-1, 1]
             hand_init_orn_rand = torch.tensor(self.cfg_task.hand_init_orn_noise, device=self.device)
             above_fixed_orn_noise = above_fixed_orn_noise @ torch.diag(hand_init_orn_rand)
+            if self.cfg_task.randomize_hand_init_tilt:
+                tilt_noise_rad = np.deg2rad(self.cfg_task.hand_init_tilt_noise_deg)
+                tilt_rand = 2 * (torch.rand((n_bad, 2), dtype=torch.float32, device=self.device) - 0.5)
+                above_fixed_orn_noise[:, 0:2] += tilt_rand * tilt_noise_rad
             hand_down_euler += above_fixed_orn_noise
             hand_down_quat[bad_envs, :] = torch_utils.quat_from_euler_xyz(
                 roll=hand_down_euler[:, 0], pitch=hand_down_euler[:, 1], yaw=hand_down_euler[:, 2]

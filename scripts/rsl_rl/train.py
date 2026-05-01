@@ -23,6 +23,18 @@ parser.add_argument("--video_interval", type=int, default=2000, help="Interval b
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
+    "--random_orn",
+    action="store_true",
+    default=False,
+    help="Enable random EE roll/pitch initialization for tasks that support it.",
+)
+parser.add_argument(
+    "--privileged_actor",
+    action="store_true",
+    default=False,
+    help="Feed critic/privileged observations to the actor during training.",
+)
+parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
@@ -182,6 +194,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg.max_iterations = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
     )
+    if args_cli.random_orn and hasattr(env_cfg, "task") and hasattr(env_cfg.task, "randomize_hand_init_tilt"):
+        env_cfg.task.randomize_hand_init_tilt = True
+    if args_cli.privileged_actor:
+        agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
