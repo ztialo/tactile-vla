@@ -27,6 +27,18 @@ parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
+parser.add_argument(
+    "--random_orn",
+    type=float,
+    default=None,
+    help="Enable random EE roll/pitch initialization with +/- this many degrees for tasks that support it.",
+)
+parser.add_argument(
+    "--privileged_actor",
+    action="store_true",
+    default=False,
+    help="Load a checkpoint whose actor consumes privileged critic observations.",
+)
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument(
     "--use_pretrained_checkpoint",
@@ -63,6 +75,18 @@ parser.add_argument(
     type=int,
     default=100,
     help="Print logging progress every N simulator steps. Use 0 to disable periodic progress prints.",
+)
+parser.add_argument(
+    "--log_success_only",
+    action="store_true",
+    default=False,
+    help="Buffer full episodes and only write rollouts for environments that finish successfully.",
+)
+parser.add_argument(
+    "--successful_episodes_target",
+    type=int,
+    default=0,
+    help="Stop after writing this many successful episodes. Use 0 to disable the success-count stop condition.",
 )
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -155,6 +179,29 @@ def _append_h5_batch(h5_file: h5py.File, batch: dict[str, np.ndarray]):
             dataset[old_size:] = array
 
 
+def _append_episode_step(storage: dict[int, list[dict[str, np.ndarray]]], env_ids: np.ndarray, batch: dict[str, np.ndarray]):
+    """Append one row per env into in-memory episode buffers."""
+    batch_size = env_ids.shape[0]
+    for idx in range(batch_size):
+        env_id = int(env_ids[idx])
+        row = {}
+        for name, array in batch.items():
+            row[name] = array[idx : idx + 1].copy()
+        storage[env_id].append(row)
+
+
+def _flush_episode_rows(h5_file: h5py.File, rows: list[dict[str, np.ndarray]]):
+    """Write a buffered episode to HDF5 as one contiguous batch."""
+    if not rows:
+        return 0
+    episode_batch = {}
+    for key in rows[0]:
+        episode_batch[key] = np.concatenate([row[key] for row in rows], axis=0)
+    _append_h5_batch(h5_file, episode_batch)
+    first_key = next(iter(episode_batch))
+    return episode_batch[first_key].shape[0]
+
+
 def _get_timeout_tensor(extras: dict, dones: torch.Tensor) -> torch.Tensor:
     """Best-effort extraction of timeout flags from RSL/IsaacLab extras."""
     for key in ("time_outs", "timeouts", "truncated", "truncations"):
@@ -199,6 +246,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     agent_cfg: RslRlBaseRunnerCfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    if args_cli.random_orn is not None and hasattr(env_cfg, "task") and hasattr(env_cfg.task, "randomize_hand_init_tilt"):
+        env_cfg.task.randomize_hand_init_tilt = True
+        env_cfg.task.hand_init_tilt_noise_deg = args_cli.random_orn
+    if args_cli.privileged_actor:
+        agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
@@ -238,16 +290,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
         teacher_task = args_cli.task.replace("Visuomotor-", "Privileged-")
         teacher_agent_cfg = cli_args.parse_rsl_rl_cfg(teacher_task, args_cli)
-        teacher_agent_cfg.obs_groups = {"policy": ["teacher_policy"], "critic": ["critic"]}
+        if args_cli.privileged_actor:
+            teacher_agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
+        else:
+            teacher_agent_cfg.obs_groups = {"policy": ["teacher_policy"], "critic": ["critic"]}
 
-        original_get_observations = base_env._get_observations
+            original_get_observations = base_env._get_observations
 
-        def _patched_get_observations():
-            obs_dict = original_get_observations()
-            obs_dict["teacher_policy"] = _compute_teacher_policy_obs(base_env)
-            return obs_dict
+            def _patched_get_observations():
+                obs_dict = original_get_observations()
+                obs_dict["teacher_policy"] = _compute_teacher_policy_obs(base_env)
+                return obs_dict
 
-        base_env._get_observations = _patched_get_observations
+            base_env._get_observations = _patched_get_observations
         runner_cfg = teacher_agent_cfg
         runner_class = OnPolicyRunner
     else:
@@ -308,23 +363,27 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     h5_file = None
     log_env_ids = None
-    episode_ids = None
     timestep_in_episode = None
+    episode_rows = None
     run_start_time = time.time()
     total_samples_written = 0
     total_episodes_finished = 0
+    total_successful_episodes_written = 0
     if args_cli.log_path:
         os.makedirs(os.path.dirname(os.path.abspath(args_cli.log_path)), exist_ok=True)
         h5_file = h5py.File(args_cli.log_path, "w")
         log_env_ids = _parse_env_ids(args_cli.log_env_ids, base_env.num_envs, base_env.device)
-        episode_ids = torch.zeros(base_env.num_envs, dtype=torch.int64, device=base_env.device)
         timestep_in_episode = torch.zeros(base_env.num_envs, dtype=torch.int64, device=base_env.device)
+        if args_cli.log_success_only:
+            episode_rows = {int(env_id): [] for env_id in log_env_ids.detach().cpu().tolist()}
         h5_file.attrs["task"] = args_cli.task
         h5_file.attrs["checkpoint"] = resume_path
         h5_file.attrs["num_envs"] = base_env.num_envs
         h5_file.attrs["logged_env_ids"] = _tensor_to_numpy(log_env_ids, dtype=np.int64)
         h5_file.attrs["action_order"] = "dx,dy,dz,droll,dpitch,dyaw"
         h5_file.attrs["quat_order"] = "w,x,y,z"
+        h5_file.attrs["log_success_only"] = args_cli.log_success_only
+        h5_file.attrs["successful_episodes_target"] = args_cli.successful_episodes_target
         print(f"[INFO] Vision rollout HDF5 log: {os.path.abspath(args_cli.log_path)}")
         print(f"[INFO] Logging env ids: {h5_file.attrs['logged_env_ids'].tolist()}")
 
@@ -348,35 +407,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     dones_mask = dones.to(dtype=torch.bool)
                     timeout = _get_timeout_tensor(extras, dones_mask)
                     gripper_pos = torch.mean(base_env.joint_pos[:, 7:], dim=1, keepdim=True)
-                    prev_action = (
-                        base_env.prev_action_obs
-                        if hasattr(base_env, "prev_action_obs")
-                        else base_env.actions
-                    )
-
                     env_id_batch = _tensor_to_numpy(log_env_ids, dtype=np.int64)
                     batch_size = env_id_batch.shape[0]
                     batch = {
-                        "env_id": env_id_batch,
-                        "global_step": np.full((batch_size,), timestep, dtype=np.int64),
-                        "episode_id": _tensor_to_numpy(episode_ids, log_env_ids, dtype=np.int64),
-                        "timestep_in_episode": _tensor_to_numpy(timestep_in_episode, log_env_ids, dtype=np.int64),
+                        "timestep": _tensor_to_numpy(timestep_in_episode, log_env_ids, dtype=np.int64),
                         "done": _tensor_to_numpy(dones_mask, log_env_ids, dtype=np.bool_),
                         "timeout": _tensor_to_numpy(timeout, log_env_ids, dtype=np.bool_),
-                        "joint_pos": _tensor_to_numpy(base_env.joint_pos[:, 0:7], log_env_ids, dtype=np.float32),
                         "gripper_pos": _tensor_to_numpy(gripper_pos, log_env_ids, dtype=np.float32),
-                        "prev_action": _tensor_to_numpy(prev_action, log_env_ids, dtype=np.float32),
                         "action": _tensor_to_numpy(actions, log_env_ids, dtype=np.float32),
-                        "fingertip_pos_rel_fixed": _tensor_to_numpy(
-                            base_env.fingertip_midpoint_pos - base_env.fixed_pos_obs_frame,
-                            log_env_ids,
-                            dtype=np.float32,
-                        ),
-                        "held_pos_rel_fixed": _tensor_to_numpy(
-                            base_env.held_pos - base_env.fixed_pos_obs_frame,
-                            log_env_ids,
-                            dtype=np.float32,
-                        ),
+                        "eef_pos": _tensor_to_numpy(base_env.fingertip_midpoint_pos, log_env_ids, dtype=np.float32),
+                        "eef_quat": _tensor_to_numpy(base_env.fingertip_midpoint_quat, log_env_ids, dtype=np.float32),
                     }
                     if not args_cli.no_log_images:
                         if not hasattr(base_env, "_wrist_camera"):
@@ -389,14 +429,33 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         else:
                             wrist_rgb = wrist_rgb.to(torch.uint8)
                         batch["wrist_rgb"] = _tensor_to_numpy(wrist_rgb, log_env_ids)
-                    _append_h5_batch(h5_file, batch)
-                    h5_file.flush()
-                    total_samples_written += batch_size
+                    if args_cli.log_success_only:
+                        _append_episode_step(episode_rows, env_id_batch, batch)
+                    else:
+                        _append_h5_batch(h5_file, batch)
+                        h5_file.flush()
+                        total_samples_written += batch_size
 
                     timestep_in_episode += 1
                     if torch.any(dones_mask):
                         total_episodes_finished += int(torch.count_nonzero(dones_mask).item())
-                        episode_ids[dones_mask] += 1
+                        if args_cli.log_success_only:
+                            succeeded_mask = getattr(base_env, "ep_succeeded", torch.zeros_like(dones_mask, dtype=torch.long))
+                            done_env_ids = log_env_ids[dones_mask[log_env_ids]]
+                            for env_id_tensor in done_env_ids:
+                                env_id = int(env_id_tensor.item())
+                                succeeded = bool(succeeded_mask[env_id].item())
+                                if succeeded:
+                                    if (
+                                        args_cli.successful_episodes_target > 0
+                                        and total_successful_episodes_written >= args_cli.successful_episodes_target
+                                    ):
+                                        episode_rows[env_id].clear()
+                                        continue
+                                    total_samples_written += _flush_episode_rows(h5_file, episode_rows[env_id])
+                                    total_successful_episodes_written += 1
+                                    h5_file.flush()
+                                episode_rows[env_id].clear()
                         timestep_in_episode[dones_mask] = 0
 
             if args_cli.video:
@@ -418,6 +477,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     f"episodes={total_episodes_finished}",
                     f"elapsed={_format_duration(elapsed)}",
                 ]
+                if args_cli.log_success_only:
+                    status_parts.append(f"successful_episodes={total_successful_episodes_written}")
                 if "successes" in extras:
                     success_value = extras["successes"]
                     if isinstance(success_value, torch.Tensor):
@@ -428,6 +489,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     eta = remaining_steps / rate
                     status_parts.append(f"eta={_format_duration(eta)}")
                 print("[INFO] " + " | ".join(status_parts))
+
+            if (
+                args_cli.log_success_only
+                and args_cli.successful_episodes_target > 0
+                and total_successful_episodes_written >= args_cli.successful_episodes_target
+            ):
+                print(f"[INFO] Reached {total_successful_episodes_written} successful episodes. Stopping collection.")
+                break
 
             # time delay for real-time evaluation
             sleep_time = dt - (time.time() - start_time)

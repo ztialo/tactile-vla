@@ -315,11 +315,17 @@ class FactoryEnv(DirectRLEnv):
     def _get_factory_obs_state_dict(self):
         """Populate dictionaries for the policy and critic."""
         prev_actions = self.actions.clone()
+        held_quat_rel_fixed = torch_utils.quat_mul(self.held_quat, torch_utils.quat_conjugate(self.fixed_quat))
+        fingertip_quat_rel_held = torch_utils.quat_mul(
+            self.fingertip_midpoint_quat, torch_utils.quat_conjugate(self.held_quat)
+        )
 
         state_dict = {
             "fingertip_pos": self.fingertip_midpoint_pos,
             "fingertip_pos_rel_fixed": self.fingertip_midpoint_pos - self.fixed_pos_obs_frame,
             "fingertip_quat": self.fingertip_midpoint_quat,
+            "held_quat_rel_fixed": held_quat_rel_fixed,
+            "fingertip_quat_rel_held": fingertip_quat_rel_held,
             "ee_linvel": self.fingertip_midpoint_linvel,
             "ee_angvel": self.fingertip_midpoint_angvel,
             "joint_pos": self.joint_pos[:, 0:7],
