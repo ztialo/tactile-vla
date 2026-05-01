@@ -70,6 +70,18 @@ import fr3_manipulation.tasks  # noqa: F401
 from train_vision_bc import VisionBCPolicy
 
 
+def _set_default_factory_video_view(env_cfg, task_name: str | None):
+    """Place the default viewer in front of env_0 for Factory assessment videos."""
+    if "Factory" not in (task_name or ""):
+        return
+    if not hasattr(env_cfg, "viewer") or env_cfg.viewer is None:
+        return
+    if hasattr(env_cfg.viewer, "eye"):
+        env_cfg.viewer.eye = (1.4, -0.015, 0.28)
+    if hasattr(env_cfg.viewer, "lookat"):
+        env_cfg.viewer.lookat = (0.60, 0.00, 0.12)
+
+
 def _to_float(value):
     if hasattr(value, "item"):
         return float(value.item())
@@ -161,12 +173,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # TiledCamera needs real cloned USD prims, not Fabric-only clones.
     env_cfg.scene.clone_in_fabric = False
-    # Pull the viewer closer for recorded perspective videos when viewer settings are available.
-    if hasattr(env_cfg, "viewer") and env_cfg.viewer is not None:
-        if hasattr(env_cfg.viewer, "eye"):
-            env_cfg.viewer.eye = (1.8, 1.2, 1.1)
-        if hasattr(env_cfg.viewer, "lookat"):
-            env_cfg.viewer.lookat = (0.0, 0.0, 0.25)
+    if args_cli.video and args_cli.video_src == "pov":
+        _set_default_factory_video_view(env_cfg, args_cli.task)
 
     checkpoint_path = os.path.abspath(args_cli.checkpoint)
     if not os.path.exists(checkpoint_path):

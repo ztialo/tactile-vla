@@ -24,9 +24,9 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
     "--random_orn",
-    action="store_true",
-    default=False,
-    help="Enable random EE roll/pitch initialization for tasks that support it.",
+    type=float,
+    default=None,
+    help="Enable random EE roll/pitch initialization with +/- this many degrees for tasks that support it.",
 )
 parser.add_argument(
     "--privileged_actor",
@@ -194,8 +194,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg.max_iterations = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
     )
-    if args_cli.random_orn and hasattr(env_cfg, "task") and hasattr(env_cfg.task, "randomize_hand_init_tilt"):
+    if args_cli.random_orn is not None and hasattr(env_cfg, "task") and hasattr(env_cfg.task, "randomize_hand_init_tilt"):
         env_cfg.task.randomize_hand_init_tilt = True
+        env_cfg.task.hand_init_tilt_noise_deg = args_cli.random_orn
     if args_cli.privileged_actor:
         agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
 

@@ -93,6 +93,18 @@ import fr3_manipulation.tasks  # noqa: F401
 # PLACEHOLDER: Extension template (do not remove this comment)
 
 
+def _set_default_factory_video_view(env_cfg, task_name: str | None):
+    """Place the default viewer in front of env_0 for Factory assessment videos."""
+    if "Factory" not in (task_name or ""):
+        return
+    if not hasattr(env_cfg, "viewer") or env_cfg.viewer is None:
+        return
+    if hasattr(env_cfg.viewer, "eye"):
+        env_cfg.viewer.eye = (1.4, -0.015, 0.28)
+    if hasattr(env_cfg.viewer, "lookat"):
+        env_cfg.viewer.lookat = (0.60, 0.00, 0.12)
+
+
 def _to_float(value):
     """Convert a scalar tensor or scalar-like value to a float."""
     if hasattr(value, "item"):
@@ -126,6 +138,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # set the environment seed (after multi-gpu config for updated rank from agent seed)
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg["params"]["seed"]
+    if args_cli.video:
+        _set_default_factory_video_view(env_cfg, args_cli.task)
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rl_games", agent_cfg["params"]["config"]["name"])

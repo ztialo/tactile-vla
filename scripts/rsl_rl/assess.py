@@ -18,7 +18,12 @@ import cli_args  # isort: skip
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Assess a checkpoint of an RSL-RL agent.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during assessment.")
-parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
+parser.add_argument(
+    "--video_length",
+    type=int,
+    default=None,
+    help="Length of the recorded video (in steps). Defaults to the assessed rollout length when unset.",
+)
 parser.add_argument(
     "--num_loops",
     type=int,
@@ -30,6 +35,18 @@ parser.add_argument(
 )
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+parser.add_argument(
+    "--random_orn",
+    type=float,
+    default=None,
+    help="Enable random EE roll/pitch initialization with +/- this many degrees for tasks that support it.",
+)
+parser.add_argument(
+    "--privileged_actor",
+    action="store_true",
+    default=False,
+    help="Feed critic/privileged observations to the actor during assessment.",
+)
 parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
@@ -63,7 +80,9 @@ import os
 import time
 
 import gymnasium as gym
+import numpy as np
 import torch
+import isaacsim.core.utils.torch as torch_utils
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
 from isaaclab.envs import (
@@ -84,6 +103,18 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import fr3_manipulation.tasks  # noqa: F401
+
+
+def _set_default_factory_video_view(env_cfg, task_name: str | None):
+    """Place the default viewer in front of env_0 for Factory assessment videos."""
+    if "Factory" not in (task_name or ""):
+        return
+    if not hasattr(env_cfg, "viewer") or env_cfg.viewer is None:
+        return
+    if hasattr(env_cfg.viewer, "eye"):
+        env_cfg.viewer.eye = (1.4, -0.015, 0.28)
+    if hasattr(env_cfg.viewer, "lookat"):
+        env_cfg.viewer.lookat = (0.60, 0.00, 0.12)
 
 
 def _to_float(value):
@@ -109,6 +140,21 @@ def _get_episode_success_rate(env):
     return torch.count_nonzero(env.ep_succeeded).float() / env.num_envs
 
 
+def _print_env0_eef_euler(env, label: str):
+    """Print env_0 end-effector Euler offsets from nominal in degrees."""
+    if not hasattr(env, "fingertip_midpoint_quat"):
+        return
+    quat = env.fingertip_midpoint_quat[0:1]
+    roll, pitch, yaw = torch_utils.get_euler_xyz(quat)
+    rpy_deg = np.rad2deg(torch.stack((roll, pitch, yaw), dim=-1)[0].detach().cpu().numpy())
+    nominal_deg = np.rad2deg(np.asarray(env.cfg_task.hand_init_orn, dtype=np.float32))
+    delta_deg = (rpy_deg - nominal_deg + 180.0) % 360.0 - 180.0
+    print(
+        f"[INFO] {label} env0 EEF delta from nominal (deg): "
+        f"roll={delta_deg[0]:+.2f}, pitch={delta_deg[1]:+.2f}, yaw={delta_deg[2]:+.2f}"
+    )
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Assess with RSL-RL agent."""
@@ -119,10 +165,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     agent_cfg: RslRlBaseRunnerCfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    if args_cli.random_orn is not None and hasattr(env_cfg, "task") and hasattr(env_cfg.task, "randomize_hand_init_tilt"):
+        env_cfg.task.randomize_hand_init_tilt = True
+        env_cfg.task.hand_init_tilt_noise_deg = args_cli.random_orn
+    if args_cli.privileged_actor:
+        agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
 
     # set the environment seed
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    if args_cli.video:
+        _set_default_factory_video_view(env_cfg, args_cli.task)
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
@@ -162,13 +215,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             f"[INFO] Assessment will stop after {args_cli.num_loops} loop(s): "
             f"{max_assessment_steps} steps ({steps_per_loop} steps per loop)."
         )
+    else:
+        steps_per_loop = max(base_env.max_episode_length - 1, 1)
 
     # wrap for video recording
     if args_cli.video:
+        if args_cli.video_length is None:
+            video_length = max_assessment_steps if max_assessment_steps is not None else steps_per_loop
+        else:
+            video_length = args_cli.video_length
         video_kwargs = {
             "video_folder": os.path.join(log_dir, "videos", "assess"),
             "step_trigger": lambda step: step == 0,
-            "video_length": args_cli.video_length,
+            "video_length": video_length,
             "disable_logger": True,
         }
         print("[INFO] Recording videos during assessment.")
@@ -201,6 +260,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # reset environment
     obs = env.get_observations()
+    _print_env0_eef_euler(base_env, "Reset")
     timestep = 0
     completed_loops = 0
     loop_success_rates = []
@@ -233,6 +293,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     final_text = "final-step success rate = unavailable"
 
                 print(f"[INFO] Loop {completed_loops}: {episode_text}, {final_text}")
+                _print_env0_eef_euler(base_env, f"Loop {completed_loops} end")
 
                 if args_cli.num_loops > 0 and completed_loops >= args_cli.num_loops:
                     break
