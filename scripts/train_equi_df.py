@@ -192,6 +192,14 @@ def _format_duration(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def _estimate_eta(elapsed_seconds: float, completed: int, total: int) -> str:
+    if completed <= 0 or total <= 0 or completed > total:
+        return "--:--:--"
+    rate = elapsed_seconds / completed
+    remaining = max(total - completed, 0) * rate
+    return _format_duration(remaining)
+
+
 @dataclass
 class EpisodeSpan:
     start: int
@@ -491,6 +499,7 @@ class H5SequenceDataset(Dataset):
         action_rows = span.start + action_offsets
 
         wrist = np.asarray(_read_h5_rows(self._file["wrist_rgb"], obs_rows), dtype=np.float32) / 255.0
+        wrist = wrist * 2.0 - 1.0
         state = _state_from_h5(self._file, obs_rows)
         state = (state - self.state_mean) / self.state_std
 
@@ -1243,10 +1252,16 @@ def main():
             total_count += action.shape[0]
 
             if args.log_interval > 0 and batch_idx % args.log_interval == 0:
+                epoch_elapsed = time.time() - epoch_start
+                run_elapsed = time.time() - run_start_time
                 print(
                     f"[INFO] Epoch {epoch:03d} Batch {batch_idx:04d}: "
                     f"train_loss={running_loss / max(total_count, 1):.6f} "
-                    f"lr={optimizer.param_groups[0]['lr']:.6e}"
+                    f"lr={optimizer.param_groups[0]['lr']:.6e} "
+                    f"epoch_elapsed={_format_duration(epoch_elapsed)} "
+                    f"epoch_eta={_estimate_eta(epoch_elapsed, batch_idx, effective_train_steps)} "
+                    f"run_elapsed={_format_duration(run_elapsed)} "
+                    f"run_eta={_estimate_eta(run_elapsed, epoch - start_epoch + 1, args.epochs - start_epoch + 1)}"
                 )
 
             if args.max_train_steps is not None and batch_idx >= args.max_train_steps:
@@ -1271,11 +1286,14 @@ def main():
             history_entry["train_action_mse_error"] = sample_mse
         history.append(history_entry)
         sample_mse_text = f"sample_mse={sample_mse:.6f} " if sample_mse is not None else ""
+        run_elapsed = time.time() - run_start_time
         print(
             f"[INFO] Epoch {epoch:03d}: train_loss={train_loss:.6f} val_loss={val_loss:.6f} "
             f"{sample_mse_text}"
             f"lr={optimizer.param_groups[0]['lr']:.6e} "
-            f"time={_format_duration(epoch_time)}"
+            f"epoch_time={_format_duration(epoch_time)} "
+            f"run_elapsed={_format_duration(run_elapsed)} "
+            f"run_eta={_estimate_eta(run_elapsed, epoch - start_epoch + 1, args.epochs - start_epoch + 1)}"
         )
 
         is_best = val_loss <= best_val

@@ -24,3 +24,5 @@ events.out.tfevents.*
 logs/
 *.pt
 *.onnx
+
+manifeel/

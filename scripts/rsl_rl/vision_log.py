@@ -190,6 +190,11 @@ def _append_episode_step(storage: dict[int, list[dict[str, np.ndarray]]], env_id
         storage[env_id].append(row)
 
 
+def _slice_batch_rows(batch: dict[str, np.ndarray], mask: np.ndarray) -> dict[str, np.ndarray]:
+    """Select a subset of env rows from a batch dict."""
+    return {name: array[mask] for name, array in batch.items()}
+
+
 def _flush_episode_rows(h5_file: h5py.File, rows: list[dict[str, np.ndarray]]):
     """Write a buffered episode to HDF5 as one contiguous batch."""
     if not rows:
@@ -376,6 +381,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         timestep_in_episode = torch.zeros(base_env.num_envs, dtype=torch.int64, device=base_env.device)
         if args_cli.log_success_only:
             episode_rows = {int(env_id): [] for env_id in log_env_ids.detach().cpu().tolist()}
+            suppress_after_success = torch.zeros(base_env.num_envs, dtype=torch.bool, device=base_env.device)
         h5_file.attrs["task"] = args_cli.task
         h5_file.attrs["checkpoint"] = resume_path
         h5_file.attrs["num_envs"] = base_env.num_envs
@@ -396,6 +402,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             start_time = time.time()
             # run everything in inference mode
             with torch.inference_mode():
+                prev_ep_succeeded = None
+                if args_cli.log_success_only and hasattr(base_env, "ep_succeeded"):
+                    prev_ep_succeeded = base_env.ep_succeeded.clone().to(dtype=torch.bool)
                 # agent stepping
                 actions = policy(obs)
                 # env stepping
@@ -430,32 +439,45 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             wrist_rgb = wrist_rgb.to(torch.uint8)
                         batch["wrist_rgb"] = _tensor_to_numpy(wrist_rgb, log_env_ids)
                     if args_cli.log_success_only:
-                        _append_episode_step(episode_rows, env_id_batch, batch)
+                        active_mask = ~suppress_after_success[log_env_ids].detach().cpu().numpy()
+                        if np.any(active_mask):
+                            _append_episode_step(
+                                episode_rows,
+                                env_id_batch[active_mask],
+                                _slice_batch_rows(batch, active_mask),
+                            )
                     else:
                         _append_h5_batch(h5_file, batch)
                         h5_file.flush()
                         total_samples_written += batch_size
 
                     timestep_in_episode += 1
+                    if args_cli.log_success_only and prev_ep_succeeded is not None:
+                        curr_ep_succeeded = base_env.ep_succeeded.to(dtype=torch.bool)
+                        first_success_mask = torch.logical_and(curr_ep_succeeded, torch.logical_not(prev_ep_succeeded))
+                        first_success_env_ids = log_env_ids[first_success_mask[log_env_ids]]
+                        for env_id_tensor in first_success_env_ids:
+                            env_id = int(env_id_tensor.item())
+                            if (
+                                args_cli.successful_episodes_target > 0
+                                and total_successful_episodes_written >= args_cli.successful_episodes_target
+                            ):
+                                episode_rows[env_id].clear()
+                                suppress_after_success[env_id] = True
+                                continue
+                            total_samples_written += _flush_episode_rows(h5_file, episode_rows[env_id])
+                            total_successful_episodes_written += 1
+                            episode_rows[env_id].clear()
+                            suppress_after_success[env_id] = True
+                            h5_file.flush()
                     if torch.any(dones_mask):
                         total_episodes_finished += int(torch.count_nonzero(dones_mask).item())
                         if args_cli.log_success_only:
-                            succeeded_mask = getattr(base_env, "ep_succeeded", torch.zeros_like(dones_mask, dtype=torch.long))
                             done_env_ids = log_env_ids[dones_mask[log_env_ids]]
                             for env_id_tensor in done_env_ids:
                                 env_id = int(env_id_tensor.item())
-                                succeeded = bool(succeeded_mask[env_id].item())
-                                if succeeded:
-                                    if (
-                                        args_cli.successful_episodes_target > 0
-                                        and total_successful_episodes_written >= args_cli.successful_episodes_target
-                                    ):
-                                        episode_rows[env_id].clear()
-                                        continue
-                                    total_samples_written += _flush_episode_rows(h5_file, episode_rows[env_id])
-                                    total_successful_episodes_written += 1
-                                    h5_file.flush()
                                 episode_rows[env_id].clear()
+                            suppress_after_success[dones_mask] = False
                         timestep_in_episode[dones_mask] = 0
 
             if args_cli.video:

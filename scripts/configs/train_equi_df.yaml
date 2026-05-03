@@ -46,4 +46,4 @@ ema_min_value: 0.0
 ema_max_value: 0.9999
 
 sample_every: 10000
-log_interval: 50
+log_interval: 1000
