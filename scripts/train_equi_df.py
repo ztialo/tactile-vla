@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import math
 import os
@@ -21,8 +22,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import yaml
+from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from torch.utils.data import DataLoader, Dataset
+from torchvision import models
 
 try:
     from escnn import nn as escnn_nn
@@ -75,6 +78,13 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=config.get("lr", 1.0e-4))
     parser.add_argument("--weight_decay", type=float, default=config.get("weight_decay", 1.0e-5))
     parser.add_argument(
+        "--state_action_normalization",
+        type=str,
+        default=config.get("state_action_normalization", "zscore"),
+        choices=["zscore", "limits"],
+        help="Normalization for low-dimensional state and action.",
+    )
+    parser.add_argument(
         "--adam_betas",
         type=float,
         nargs=2,
@@ -118,8 +128,15 @@ def parse_args():
         "--vision_encoder",
         type=str,
         default=config.get("vision_encoder", "cnn"),
-        choices=["cnn", "escnn_cyclic"],
+        choices=["cnn", "escnn_cyclic", "resnet18_gn"],
         help="Vision encoder backend. escnn_cyclic requires the escnn package.",
+    )
+    parser.add_argument(
+        "--image_normalization",
+        type=str,
+        default=config.get("image_normalization", "minus_one_one"),
+        choices=["minus_one_one", "imagenet", "zero_one"],
+        help="Image normalization applied before the encoder.",
     )
     parser.add_argument("--image_embed_dim", type=int, default=config.get("image_embed_dim", 128))
     parser.add_argument(
@@ -138,6 +155,13 @@ def parse_args():
     parser.add_argument("--n_groups", type=int, default=config.get("n_groups", 8))
     parser.add_argument("--cond_predict_scale", type=lambda x: str(x).lower() in {"1", "true", "yes", "on"}, default=config.get("cond_predict_scale", True))
     parser.add_argument("--num_diffusion_steps", type=int, default=config.get("num_diffusion_steps", 100))
+    parser.add_argument(
+        "--scheduler_type",
+        type=str,
+        default=config.get("scheduler_type", "ddim"),
+        choices=["ddim", "ddpm"],
+        help="Diffusion scheduler type.",
+    )
     parser.add_argument(
         "--prediction_type",
         type=str,
@@ -212,10 +236,10 @@ class EpisodeSpan:
 
 @dataclass
 class DatasetStats:
-    state_mean: list[float]
-    state_std: list[float]
-    action_mean: list[float]
-    action_std: list[float]
+    state_center: list[float]
+    state_scale: list[float]
+    action_center: list[float]
+    action_scale: list[float]
 
 
 class ExponentialMovingAverage:
@@ -400,11 +424,20 @@ def _split_episodes(
     return train_spans, val_spans
 
 
-def _compute_stats(h5_path: str, spans: list[EpisodeSpan], rotation_repr: str) -> DatasetStats:
+def _compute_stats(
+    h5_path: str,
+    spans: list[EpisodeSpan],
+    rotation_repr: str,
+    normalization_mode: str,
+) -> DatasetStats:
     state_sum = None
     state_sq_sum = None
     action_sum = None
     action_sq_sum = None
+    state_min = None
+    state_max = None
+    action_min = None
+    action_max = None
     num_state_rows = 0
     num_action_rows = 0
 
@@ -420,11 +453,19 @@ def _compute_stats(h5_path: str, spans: list[EpisodeSpan], rotation_repr: str) -
                 state_sq_sum = np.square(state, dtype=np.float64).sum(axis=0)
                 action_sum = action_repr.sum(axis=0, dtype=np.float64)
                 action_sq_sum = np.square(action_repr, dtype=np.float64).sum(axis=0)
+                state_min = state.min(axis=0)
+                state_max = state.max(axis=0)
+                action_min = action_repr.min(axis=0)
+                action_max = action_repr.max(axis=0)
             else:
                 state_sum += state.sum(axis=0, dtype=np.float64)
                 state_sq_sum += np.square(state, dtype=np.float64).sum(axis=0)
                 action_sum += action_repr.sum(axis=0, dtype=np.float64)
                 action_sq_sum += np.square(action_repr, dtype=np.float64).sum(axis=0)
+                state_min = np.minimum(state_min, state.min(axis=0))
+                state_max = np.maximum(state_max, state.max(axis=0))
+                action_min = np.minimum(action_min, action_repr.min(axis=0))
+                action_max = np.maximum(action_max, action_repr.max(axis=0))
 
             num_state_rows += state.shape[0]
             num_action_rows += action_repr.shape[0]
@@ -432,19 +473,27 @@ def _compute_stats(h5_path: str, spans: list[EpisodeSpan], rotation_repr: str) -
     if num_state_rows == 0 or num_action_rows == 0:
         raise ValueError("Cannot compute normalization stats from an empty split.")
 
-    state_mean = state_sum / num_state_rows
-    state_var = state_sq_sum / num_state_rows - np.square(state_mean)
-    state_std = np.sqrt(np.maximum(state_var, 1.0e-6))
+    if normalization_mode == "zscore":
+        state_center = state_sum / num_state_rows
+        state_var = state_sq_sum / num_state_rows - np.square(state_center)
+        state_scale = np.sqrt(np.maximum(state_var, 1.0e-6))
 
-    action_mean = action_sum / num_action_rows
-    action_var = action_sq_sum / num_action_rows - np.square(action_mean)
-    action_std = np.sqrt(np.maximum(action_var, 1.0e-6))
+        action_center = action_sum / num_action_rows
+        action_var = action_sq_sum / num_action_rows - np.square(action_center)
+        action_scale = np.sqrt(np.maximum(action_var, 1.0e-6))
+    elif normalization_mode == "limits":
+        state_center = 0.5 * (state_max + state_min)
+        state_scale = np.maximum(0.5 * (state_max - state_min), 1.0e-6)
+        action_center = 0.5 * (action_max + action_min)
+        action_scale = np.maximum(0.5 * (action_max - action_min), 1.0e-6)
+    else:
+        raise ValueError(f"Unsupported state_action_normalization: {normalization_mode}")
 
     return DatasetStats(
-        state_mean=state_mean.astype(np.float32).tolist(),
-        state_std=state_std.astype(np.float32).tolist(),
-        action_mean=action_mean.astype(np.float32).tolist(),
-        action_std=action_std.astype(np.float32).tolist(),
+        state_center=np.asarray(state_center, dtype=np.float32).tolist(),
+        state_scale=np.asarray(state_scale, dtype=np.float32).tolist(),
+        action_center=np.asarray(action_center, dtype=np.float32).tolist(),
+        action_scale=np.asarray(action_scale, dtype=np.float32).tolist(),
     )
 
 
@@ -457,21 +506,23 @@ class H5SequenceDataset(Dataset):
         spans: list[EpisodeSpan],
         n_obs_steps: int,
         horizon: int,
-        state_mean: np.ndarray,
-        state_std: np.ndarray,
-        action_mean: np.ndarray,
-        action_std: np.ndarray,
+        state_center: np.ndarray,
+        state_scale: np.ndarray,
+        action_center: np.ndarray,
+        action_scale: np.ndarray,
         rotation_repr: str,
+        image_normalization: str,
     ):
         self.h5_path = h5_path
         self.spans = spans
         self.n_obs_steps = n_obs_steps
         self.horizon = horizon
-        self.state_mean = state_mean.astype(np.float32)
-        self.state_std = state_std.astype(np.float32)
-        self.action_mean = action_mean.astype(np.float32)
-        self.action_std = action_std.astype(np.float32)
+        self.state_center = state_center.astype(np.float32)
+        self.state_scale = state_scale.astype(np.float32)
+        self.action_center = action_center.astype(np.float32)
+        self.action_scale = action_scale.astype(np.float32)
         self.rotation_repr = rotation_repr
+        self.image_normalization = image_normalization
         self._file = None
         self.samples: list[tuple[int, int]] = []
         for episode_idx, span in enumerate(self.spans):
@@ -499,13 +550,22 @@ class H5SequenceDataset(Dataset):
         action_rows = span.start + action_offsets
 
         wrist = np.asarray(_read_h5_rows(self._file["wrist_rgb"], obs_rows), dtype=np.float32) / 255.0
-        wrist = wrist * 2.0 - 1.0
+        if self.image_normalization == "minus_one_one":
+            wrist = wrist * 2.0 - 1.0
+        elif self.image_normalization == "imagenet":
+            mean = np.asarray([0.485, 0.456, 0.406], dtype=np.float32)
+            std = np.asarray([0.229, 0.224, 0.225], dtype=np.float32)
+            wrist = (wrist - mean) / std
+        elif self.image_normalization == "zero_one":
+            pass
+        else:
+            raise ValueError(f"Unsupported image_normalization: {self.image_normalization}")
         state = _state_from_h5(self._file, obs_rows)
-        state = (state - self.state_mean) / self.state_std
+        state = (state - self.state_center) / self.state_scale
 
         raw_action = np.asarray(_read_h5_rows(self._file["action"], action_rows), dtype=np.float32)
         action = _convert_action_repr_numpy(raw_action, self.rotation_repr)
-        action = (action - self.action_mean) / self.action_std
+        action = (action - self.action_center) / self.action_scale
 
         return {
             "obs": {
@@ -572,6 +632,26 @@ class SimpleVisionEncoder(nn.Module):
         feature_map = self.backbone(image)
         pooled = self.pool(feature_map)
         return self.encoder(pooled)
+
+
+class ResNet18GroupNormEncoder(nn.Module):
+    def __init__(self, out_dim: int):
+        super().__init__()
+        norm_layer = functools.partial(nn.GroupNorm, 32)
+        backbone = models.resnet18(weights=None, norm_layer=norm_layer)
+        backbone.fc = nn.Identity()
+        self.backbone = backbone
+        self.register_buffer("imagenet_mean", torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1))
+        self.register_buffer("imagenet_std", torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1))
+        self.proj = nn.Sequential(
+            nn.Linear(512, out_dim),
+            nn.SiLU(),
+        )
+
+    def forward(self, image: torch.Tensor) -> torch.Tensor:
+        image = (image - self.imagenet_mean) / self.imagenet_std
+        feat = self.backbone(image)
+        return self.proj(feat)
 
 
 _EquiResBlockBase = escnn_nn.EquivariantModule if escnn_nn is not None else nn.Module
@@ -669,6 +749,8 @@ class ObservationEncoder(nn.Module):
         super().__init__()
         if vision_encoder == "cnn":
             self.image_encoder = SimpleVisionEncoder(image_embed_dim)
+        elif vision_encoder == "resnet18_gn":
+            self.image_encoder = ResNet18GroupNormEncoder(image_embed_dim)
         elif vision_encoder == "escnn_cyclic":
             self.image_encoder = ESCNNCyclicVisionEncoder(image_embed_dim)
         else:
@@ -888,21 +970,21 @@ class EquiDiffusionPolicy(nn.Module):
             n_groups=n_groups,
             cond_predict_scale=cond_predict_scale,
         )
-        self.register_buffer("action_mean", torch.zeros(action_dim), persistent=True)
-        self.register_buffer("action_std", torch.ones(action_dim), persistent=True)
+        self.register_buffer("action_center", torch.zeros(action_dim), persistent=True)
+        self.register_buffer("action_scale", torch.ones(action_dim), persistent=True)
 
     def forward(self, wrist: torch.Tensor, state: torch.Tensor, noisy_action: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
         global_cond = self.obs_encoder(wrist, state)
         return self.noise_pred_net(noisy_action, timesteps, global_cond)
 
-    def set_normalizer(self, action_mean: np.ndarray | torch.Tensor, action_std: np.ndarray | torch.Tensor):
-        action_mean_tensor = torch.as_tensor(action_mean, dtype=self.action_mean.dtype, device=self.action_mean.device)
-        action_std_tensor = torch.as_tensor(action_std, dtype=self.action_std.dtype, device=self.action_std.device)
-        self.action_mean.copy_(action_mean_tensor)
-        self.action_std.copy_(action_std_tensor)
+    def set_normalizer(self, action_center: np.ndarray | torch.Tensor, action_scale: np.ndarray | torch.Tensor):
+        action_center_tensor = torch.as_tensor(action_center, dtype=self.action_center.dtype, device=self.action_center.device)
+        action_scale_tensor = torch.as_tensor(action_scale, dtype=self.action_scale.dtype, device=self.action_scale.device)
+        self.action_center.copy_(action_center_tensor)
+        self.action_scale.copy_(action_scale_tensor)
 
     def _denormalize_action(self, action: torch.Tensor) -> torch.Tensor:
-        return action * self.action_std.view(1, 1, -1) + self.action_mean.view(1, 1, -1)
+        return action * self.action_scale.view(1, 1, -1) + self.action_center.view(1, 1, -1)
 
     def conditional_sample(self, obs_dict: dict[str, torch.Tensor], scheduler: DDIMScheduler) -> torch.Tensor:
         wrist = obs_dict["wrist"]
@@ -935,32 +1017,34 @@ class EquiDiffusionPolicy(nn.Module):
 
 
 def _create_dataloaders(args, stats: DatasetStats, train_spans: list[EpisodeSpan], val_spans: list[EpisodeSpan]):
-    state_mean = np.asarray(stats.state_mean, dtype=np.float32)
-    state_std = np.asarray(stats.state_std, dtype=np.float32)
-    action_mean = np.asarray(stats.action_mean, dtype=np.float32)
-    action_std = np.asarray(stats.action_std, dtype=np.float32)
+    state_center = np.asarray(stats.state_center, dtype=np.float32)
+    state_scale = np.asarray(stats.state_scale, dtype=np.float32)
+    action_center = np.asarray(stats.action_center, dtype=np.float32)
+    action_scale = np.asarray(stats.action_scale, dtype=np.float32)
 
     train_dataset = H5SequenceDataset(
         args.dataset,
         train_spans,
         args.n_obs_steps,
         args.horizon,
-        state_mean,
-        state_std,
-        action_mean,
-        action_std,
+        state_center,
+        state_scale,
+        action_center,
+        action_scale,
         args.rotation_repr,
+        args.image_normalization,
     )
     val_dataset = H5SequenceDataset(
         args.dataset,
         val_spans,
         args.n_obs_steps,
         args.horizon,
-        state_mean,
-        state_std,
-        action_mean,
-        action_std,
+        state_center,
+        state_scale,
+        action_center,
+        action_scale,
         args.rotation_repr,
+        args.image_normalization,
     )
 
     train_loader = DataLoader(
@@ -997,6 +1081,24 @@ def _make_lr_lambda(total_steps: int, warmup_steps: int, schedule_name: str):
         return 0.5 * (1.0 + math.cos(math.pi * progress))
 
     return _lr_lambda
+
+
+def _build_diffusion_scheduler(args):
+    scheduler_cls = DDIMScheduler if args.scheduler_type == "ddim" else DDPMScheduler
+    scheduler_kwargs = dict(
+        num_train_timesteps=args.num_diffusion_steps,
+        beta_start=1.0e-4,
+        beta_end=0.02,
+        beta_schedule="squaredcos_cap_v2",
+        clip_sample=True,
+        prediction_type=args.prediction_type,
+    )
+    if args.scheduler_type == "ddim":
+        scheduler_kwargs["set_alpha_to_one"] = True
+        scheduler_kwargs["steps_offset"] = 0
+    else:
+        scheduler_kwargs["variance_type"] = "fixed_small"
+    return scheduler_cls(**scheduler_kwargs)
 
 
 def _compute_diffusion_loss(
@@ -1101,9 +1203,9 @@ def main():
         raise ValueError("Training split is empty.")
 
     print(f"[INFO] Episodes: total={len(spans)} train={len(train_spans)} val={len(val_spans)}")
-    stats = _compute_stats(args.dataset, train_spans, args.rotation_repr)
-    state_dim = len(stats.state_mean)
-    action_dim = len(stats.action_mean)
+    stats = _compute_stats(args.dataset, train_spans, args.rotation_repr, args.state_action_normalization)
+    state_dim = len(stats.state_center)
+    action_dim = len(stats.action_center)
     print(f"[INFO] State dim: {state_dim}")
     print(f"[INFO] Action dim after conversion: {action_dim}")
 
@@ -1156,16 +1258,7 @@ def main():
         eps=args.adam_eps,
         weight_decay=args.weight_decay,
     )
-    diffusion_scheduler = DDIMScheduler(
-        num_train_timesteps=args.num_diffusion_steps,
-        beta_start=1.0e-4,
-        beta_end=0.02,
-        beta_schedule="squaredcos_cap_v2",
-        clip_sample=True,
-        set_alpha_to_one=True,
-        steps_offset=0,
-        prediction_type=args.prediction_type,
-    )
+    diffusion_scheduler = _build_diffusion_scheduler(args)
     batches_per_epoch = len(train_loader) if args.max_train_steps is None else min(len(train_loader), args.max_train_steps)
     optimizer_steps_per_epoch = max(math.ceil(batches_per_epoch / max(args.gradient_accumulate_every, 1)), 1)
     total_train_steps = max(optimizer_steps_per_epoch * args.epochs, 1)
@@ -1186,11 +1279,11 @@ def main():
         if args.use_ema
         else None
     )
-    action_mean = np.asarray(stats.action_mean, dtype=np.float32)
-    action_std = np.asarray(stats.action_std, dtype=np.float32)
-    model.set_normalizer(action_mean, action_std)
+    action_center = np.asarray(stats.action_center, dtype=np.float32)
+    action_scale = np.asarray(stats.action_scale, dtype=np.float32)
+    model.set_normalizer(action_center, action_scale)
     if ema_model is not None:
-        ema_model.set_normalizer(action_mean, action_std)
+        ema_model.set_normalizer(action_center, action_scale)
 
     config = vars(args).copy()
     config.update(

@@ -1,12 +1,12 @@
 dataset: data/peg_insert_expert_80.hdf5
-output_dir: logs/equidf/peg_insert_run1
+output_dir: logs/diffusion/peg_insert_run1
 
 
-epochs: 100
+epochs: 8
 batch_size: 8
-lr: 1.0e-4
+lr: 8.0e-5
 weight_decay: 1.0e-6
-state_action_normalization: zscore
+state_action_normalization: limits
 adam_betas: [0.95, 0.999]
 adam_eps: 1.0e-8
 val_split: 0.1
@@ -26,19 +26,19 @@ horizon: 16
 n_action_steps: 8
 num_inference_steps: 100
 
-rotation_repr: rot6d
-vision_encoder: escnn_cyclic
-image_normalization: minus_one_one
+rotation_repr: rot9d
+vision_encoder: resnet18_gn
+image_normalization: zero_one
 image_embed_dim: 128
 obs_feature_dim: 128
 diffusion_step_embed_dim: 128
-down_dims: [512, 1024, 2048]
+down_dims: [256, 512, 1024]
 kernel_size: 5
 n_groups: 8
 cond_predict_scale: true
-scheduler_type: ddim
+scheduler_type: ddpm
 num_diffusion_steps: 100
-prediction_type: sample
+prediction_type: epsilon
 lr_scheduler: cosine
 lr_warmup_steps: 500
 use_ema: true
@@ -49,4 +49,4 @@ ema_min_value: 0.0
 ema_max_value: 0.9999
 
 sample_every: 10000
-log_interval: 1000
+log_interval: 500
