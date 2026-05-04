@@ -27,3 +27,4 @@ logs/
 *.onnx
 
 manifeel/
+train_diffusion_workspace.log

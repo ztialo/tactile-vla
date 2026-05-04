@@ -68,7 +68,7 @@ training:
 
 logging:
   project: tactile-vla-diffusion
-  mode: offline
+  mode: online
   name: gear_mesh_workspace
   tags: [diffusion, gear_mesh]
 

@@ -391,8 +391,11 @@ class TrainDiffusionUnetImageWorkspace:
                     eval_model.eval()
                     with torch.inference_mode():
                         result = eval_model.predict_action(train_sampling_batch["obs"], diffusion_scheduler)
+                        target_action = eval_model._repr_to_raw_action(
+                            eval_model._denormalize_action(train_sampling_batch["action"])
+                        )
                         step_log["train_action_mse_error"] = torch.nn.functional.mse_loss(
-                            result["action_pred"], train_sampling_batch["action"]
+                            result["action_pred"], target_action
                         ).item()
 
                 history.append({"epoch": epoch + 1, "train_loss": train_loss, "val_loss": val_loss, **({"train_action_mse_error": step_log["train_action_mse_error"]} if "train_action_mse_error" in step_log else {})})
