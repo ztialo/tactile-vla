@@ -195,13 +195,18 @@ def _slice_batch_rows(batch: dict[str, np.ndarray], mask: np.ndarray) -> dict[st
     return {name: array[mask] for name, array in batch.items()}
 
 
-def _flush_episode_rows(h5_file: h5py.File, rows: list[dict[str, np.ndarray]]):
+def _flush_episode_rows(h5_file: h5py.File, rows: list[dict[str, np.ndarray]], force_terminal: bool = False):
     """Write a buffered episode to HDF5 as one contiguous batch."""
     if not rows:
         return 0
     episode_batch = {}
     for key in rows[0]:
         episode_batch[key] = np.concatenate([row[key] for row in rows], axis=0)
+    if force_terminal:
+        if "done" in episode_batch:
+            episode_batch["done"][-1] = True
+        if "timeout" in episode_batch:
+            episode_batch["timeout"][-1] = False
     _append_h5_batch(h5_file, episode_batch)
     first_key = next(iter(episode_batch))
     return episode_batch[first_key].shape[0]
@@ -465,7 +470,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                                 episode_rows[env_id].clear()
                                 suppress_after_success[env_id] = True
                                 continue
-                            total_samples_written += _flush_episode_rows(h5_file, episode_rows[env_id])
+                            total_samples_written += _flush_episode_rows(
+                                h5_file, episode_rows[env_id], force_terminal=True
+                            )
                             total_successful_episodes_written += 1
                             episode_rows[env_id].clear()
                             suppress_after_success[env_id] = True
