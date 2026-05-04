@@ -341,6 +341,36 @@ def _matrix_to_rot6d(rotmat: torch.Tensor) -> torch.Tensor:
     return rotmat[..., :, :2].reshape(*rotmat.shape[:-2], 6)
 
 
+def _rot6d_to_matrix(rot6d: torch.Tensor) -> torch.Tensor:
+    a1 = rot6d[..., 0:3]
+    a2 = rot6d[..., 3:6]
+    b1 = F.normalize(a1, dim=-1)
+    b2 = a2 - torch.sum(b1 * a2, dim=-1, keepdim=True) * b1
+    b2 = F.normalize(b2, dim=-1)
+    b3 = torch.cross(b1, b2, dim=-1)
+    return torch.stack((b1, b2, b3), dim=-1)
+
+
+def _matrix_to_rotation_vector(rotmat: torch.Tensor) -> torch.Tensor:
+    trace = rotmat[..., 0, 0] + rotmat[..., 1, 1] + rotmat[..., 2, 2]
+    cos_theta = torch.clamp((trace - 1.0) * 0.5, -1.0, 1.0)
+    theta = torch.acos(cos_theta)
+    sin_theta = torch.sin(theta)
+
+    rx = rotmat[..., 2, 1] - rotmat[..., 1, 2]
+    ry = rotmat[..., 0, 2] - rotmat[..., 2, 0]
+    rz = rotmat[..., 1, 0] - rotmat[..., 0, 1]
+    axis_numer = torch.stack((rx, ry, rz), dim=-1)
+
+    scale = theta / torch.clamp(2.0 * sin_theta, min=1.0e-6)
+    rotvec = axis_numer * scale.unsqueeze(-1)
+
+    small = theta < 1.0e-4
+    if torch.any(small):
+        rotvec = torch.where(small.unsqueeze(-1), 0.5 * axis_numer, rotvec)
+    return rotvec
+
+
 def _convert_action_repr_torch(action: torch.Tensor, rotation_repr: str) -> torch.Tensor:
     dpos = action[..., :3]
     drot = action[..., 3:]
@@ -947,6 +977,7 @@ class EquiDiffusionPolicy(nn.Module):
         n_action_steps: int,
         num_inference_steps: int,
         cond_predict_scale: bool,
+        rotation_repr: str,
     ):
         super().__init__()
         self.horizon = horizon
@@ -954,6 +985,7 @@ class EquiDiffusionPolicy(nn.Module):
         self.n_action_steps = n_action_steps
         self.num_inference_steps = num_inference_steps
         self.action_dim = action_dim
+        self.rotation_repr = rotation_repr
         self.obs_encoder = ObservationEncoder(
             state_dim=state_dim,
             image_embed_dim=image_embed_dim,
@@ -986,6 +1018,18 @@ class EquiDiffusionPolicy(nn.Module):
     def _denormalize_action(self, action: torch.Tensor) -> torch.Tensor:
         return action * self.action_scale.view(1, 1, -1) + self.action_center.view(1, 1, -1)
 
+    def _repr_to_raw_action(self, action_repr: torch.Tensor) -> torch.Tensor:
+        dpos = action_repr[..., :3]
+        if self.rotation_repr == "rotvec":
+            drot = action_repr[..., 3:6]
+        elif self.rotation_repr == "rot6d":
+            drot = _matrix_to_rotation_vector(_rot6d_to_matrix(action_repr[..., 3:9]))
+        elif self.rotation_repr == "rot9d":
+            drot = _matrix_to_rotation_vector(action_repr[..., 3:12].reshape(*action_repr.shape[:-1], 3, 3))
+        else:
+            raise ValueError(f"Unsupported rotation_repr: {self.rotation_repr}")
+        return torch.cat((dpos, drot), dim=-1)
+
     def conditional_sample(self, obs_dict: dict[str, torch.Tensor], scheduler: DDIMScheduler) -> torch.Tensor:
         wrist = obs_dict["wrist"]
         state = obs_dict["state"]
@@ -1008,11 +1052,12 @@ class EquiDiffusionPolicy(nn.Module):
         action_pred_norm = self.conditional_sample(obs_dict, scheduler)
         start = min(max(self.n_obs_steps - 1, 0), max(self.horizon - 1, 0))
         end = min(start + self.n_action_steps, self.horizon)
-        action_norm = action_pred_norm[:, start:end]
+        action_repr = self._denormalize_action(action_pred_norm)
+        action_repr_chunk = action_repr[:, start:end]
         return {
-            "action": self._denormalize_action(action_norm),
-            "action_pred": action_pred_norm,
-            "action_pred_denorm": self._denormalize_action(action_pred_norm),
+            "action": self._repr_to_raw_action(action_repr_chunk),
+            "action_pred": self._repr_to_raw_action(action_repr),
+            "action_pred_repr": action_repr,
         }
 
 
@@ -1229,6 +1274,7 @@ def main():
         n_action_steps=args.n_action_steps,
         num_inference_steps=args.num_inference_steps,
         cond_predict_scale=args.cond_predict_scale,
+        rotation_repr=args.rotation_repr,
     ).to(device)
     ema_model = None
     if args.use_ema:
@@ -1247,6 +1293,7 @@ def main():
             n_action_steps=args.n_action_steps,
             num_inference_steps=args.num_inference_steps,
             cond_predict_scale=args.cond_predict_scale,
+            rotation_repr=args.rotation_repr,
         ).to(device)
     _initialize_policy_modules(model, train_dataset, action_dim, args.horizon, device)
     if ema_model is not None:

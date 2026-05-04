@@ -2,7 +2,7 @@ dataset: data/peg_insert_expert_80.hdf5
 output_dir: logs/diffusion/peg_insert_run1
 
 
-epochs: 8
+epochs: 100
 batch_size: 8
 lr: 8.0e-5
 weight_decay: 1.0e-6

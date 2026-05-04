@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers.
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""Assess an offline diffusion visuomotor policy inside Isaac Lab."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import time
+from types import SimpleNamespace
+
+from isaaclab.app import AppLauncher
+
+sys.path.append(os.path.join(os.path.dirname(__file__), "rsl_rl"))
+import cli_args  # isort: skip
+
+SCRIPT_DIR = os.path.dirname(__file__)
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+import train_equi_df as train_impl  # isort: skip
+
+
+parser = argparse.ArgumentParser(description="Assess an offline diffusion policy in Isaac Lab.")
+parser.add_argument("--checkpoint", type=str, required=True, help="Path to offline diffusion checkpoint (*.pt).")
+parser.add_argument("--video", action="store_true", default=False, help="Record videos during assessment.")
+parser.add_argument(
+    "--video_src",
+    type=str,
+    default="pov",
+    choices=["pov", "zed"],
+    help="Video source: `pov` records the viewer perspective, `zed` records the wrist camera stream.",
+)
+parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
+parser.add_argument(
+    "--num_loops",
+    type=int,
+    default=1,
+    help="Number of episode-length loops to run before stopping. Use <= 0 to run until closed.",
+)
+parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
+parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment.")
+parser.add_argument(
+    "--random_orn",
+    type=float,
+    default=None,
+    help="Enable random EE roll/pitch initialization with +/- this many degrees for tasks that support it.",
+)
+parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+AppLauncher.add_app_launcher_args(parser)
+args_cli, hydra_args = parser.parse_known_args()
+args_cli.enable_cameras = True
+
+sys.argv = [sys.argv[0]] + hydra_args
+
+app_launcher = AppLauncher(args_cli)
+simulation_app = app_launcher.app
+
+import gymnasium as gym
+import imageio.v2 as imageio
+import numpy as np
+import torch
+
+from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg, DirectRLEnvCfg, ManagerBasedRLEnvCfg, multi_agent_to_single_agent
+from isaaclab.utils.dict import print_dict
+
+import isaaclab_tasks  # noqa: F401
+from isaaclab_tasks.utils.hydra import hydra_task_config
+
+import fr3_manipulation.tasks  # noqa: F401
+
+
+def _set_default_factory_video_view(env_cfg, task_name: str | None):
+    if "Factory" not in (task_name or ""):
+        return
+    if not hasattr(env_cfg, "viewer") or env_cfg.viewer is None:
+        return
+    if hasattr(env_cfg.viewer, "eye"):
+        env_cfg.viewer.eye = (1.4, -0.015, 0.28)
+    if hasattr(env_cfg.viewer, "lookat"):
+        env_cfg.viewer.lookat = (0.60, 0.00, 0.12)
+
+
+def _to_float(value):
+    if hasattr(value, "item"):
+        return float(value.item())
+    return float(value)
+
+
+def _get_current_success_rate(env):
+    if not hasattr(env, "_get_curr_successes"):
+        return None
+    check_rot = getattr(env.cfg_task, "name", None) == "nut_thread"
+    curr_successes = env._get_curr_successes(success_threshold=env.cfg_task.success_threshold, check_rot=check_rot)
+    return torch.count_nonzero(curr_successes).float() / env.num_envs
+
+
+def _get_episode_success_rate(env):
+    if not hasattr(env, "ep_succeeded"):
+        return None
+    return torch.count_nonzero(env.ep_succeeded).float() / env.num_envs
+
+
+def _to_uint8_rgb(frame: torch.Tensor):
+    frame = frame.detach().cpu()
+    if frame.dtype != torch.uint8:
+        frame = torch.clamp(frame, 0, 255).to(torch.uint8)
+    return frame.numpy()
+
+
+def _make_zed_grid(rgb_batch: torch.Tensor):
+    frames = [_to_uint8_rgb(rgb_batch[i, ..., :3]) for i in range(min(rgb_batch.shape[0], 10))]
+    if not frames:
+        raise RuntimeError("No wrist camera frames available for ZED video recording.")
+    frame_h, frame_w, frame_c = frames[0].shape
+    blank = torch.zeros((frame_h, frame_w, frame_c), dtype=torch.uint8).numpy()
+    while len(frames) < 10:
+        frames.append(blank.copy())
+    top = frames[0:5]
+    bottom = frames[5:10]
+    return np.concatenate((np.concatenate(top, axis=1), np.concatenate(bottom, axis=1)), axis=0)
+
+
+class OfflineDiffusionInferencePolicy:
+    def __init__(self, checkpoint_path: str, device: torch.device):
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        config = checkpoint["config"]
+        stats = checkpoint["stats"]
+
+        self.config = config
+        self.device = device
+        self.model = train_impl.EquiDiffusionPolicy(
+            state_dim=config["state_dim"],
+            action_dim=config["action_dim"],
+            n_obs_steps=config["n_obs_steps"],
+            image_embed_dim=config["image_embed_dim"],
+            obs_feature_dim=config["obs_feature_dim"],
+            vision_encoder=config["vision_encoder"],
+            diffusion_step_embed_dim=config["diffusion_step_embed_dim"],
+            down_dims=config["down_dims"],
+            kernel_size=config["kernel_size"],
+            n_groups=config["n_groups"],
+            horizon=config["horizon"],
+            n_action_steps=config["n_action_steps"],
+            num_inference_steps=config["num_inference_steps"],
+            cond_predict_scale=config.get("cond_predict_scale", True),
+            rotation_repr=config["rotation_repr"],
+        ).to(device)
+
+        state_dict = checkpoint["ema_model"] if checkpoint.get("ema_model") is not None else checkpoint["model"]
+        self.model.load_state_dict(state_dict)
+        self.model.eval()
+
+        action_center = np.asarray(stats.get("action_center", stats.get("action_mean")), dtype=np.float32)
+        action_scale = np.asarray(stats.get("action_scale", stats.get("action_std")), dtype=np.float32)
+        self.model.set_normalizer(action_center, action_scale)
+
+        self.state_center = torch.tensor(stats.get("state_center", stats.get("state_mean")), dtype=torch.float32, device=device)
+        self.state_scale = torch.tensor(stats.get("state_scale", stats.get("state_std")), dtype=torch.float32, device=device)
+        self.image_normalization = config.get("image_normalization", "minus_one_one")
+        self.scheduler = train_impl._build_diffusion_scheduler(
+            SimpleNamespace(
+                scheduler_type=config.get("scheduler_type", "ddim"),
+                num_diffusion_steps=config["num_diffusion_steps"],
+                prediction_type=config["prediction_type"],
+            )
+        )
+        self.n_obs_steps = config["n_obs_steps"]
+        self._wrist_history = None
+        self._state_history = None
+        self._action_plan = None
+        self._action_step = 0
+
+    def reset(self):
+        self._wrist_history = None
+        self._state_history = None
+        self._action_plan = None
+        self._action_step = 0
+
+    def _normalize_images(self, wrist_rgb: torch.Tensor) -> torch.Tensor:
+        wrist = wrist_rgb.float() / 255.0
+        if self.image_normalization == "minus_one_one":
+            wrist = wrist * 2.0 - 1.0
+        elif self.image_normalization == "zero_one":
+            pass
+        elif self.image_normalization == "imagenet":
+            pass
+        else:
+            raise ValueError(f"Unsupported image_normalization: {self.image_normalization}")
+        return wrist
+
+    def _build_current_obs(self, env) -> tuple[torch.Tensor, torch.Tensor]:
+        if env._wrist_camera is None:
+            raise RuntimeError("Offline diffusion policy requires wrist camera data, but no wrist camera is configured.")
+        wrist = self._normalize_images(env._wrist_camera.data.output["rgb"][..., :3])
+        gripper_pos = torch.mean(env.joint_pos[:, 7:], dim=1, keepdim=True)
+        state = torch.cat((env.fingertip_midpoint_pos, env.fingertip_midpoint_quat, gripper_pos), dim=-1)
+        state = (state - self.state_center) / self.state_scale
+        return wrist, state
+
+    @torch.inference_mode()
+    def act(self, env) -> torch.Tensor:
+        wrist, state = self._build_current_obs(env)
+        if self._wrist_history is None or self._state_history is None:
+            self._wrist_history = wrist.unsqueeze(1).repeat(1, self.n_obs_steps, 1, 1, 1)
+            self._state_history = state.unsqueeze(1).repeat(1, self.n_obs_steps, 1)
+        else:
+            self._wrist_history = torch.roll(self._wrist_history, shifts=-1, dims=1)
+            self._wrist_history[:, -1] = wrist
+            self._state_history = torch.roll(self._state_history, shifts=-1, dims=1)
+            self._state_history[:, -1] = state
+
+        if self._action_plan is None or self._action_step >= self._action_plan.shape[1]:
+            result = self.model.predict_action({"wrist": self._wrist_history, "state": self._state_history}, self.scheduler)
+            self._action_plan = result["action"]
+            self._action_step = 0
+
+        action = self._action_plan[:, self._action_step]
+        self._action_step += 1
+        return action
+
+
+@hydra_task_config(args_cli.task, None)
+def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg):
+    del agent_cfg
+
+    if args_cli.num_envs is not None:
+        env_cfg.scene.num_envs = args_cli.num_envs
+    if args_cli.seed is not None:
+        env_cfg.seed = args_cli.seed
+    if args_cli.device is not None:
+        env_cfg.sim.device = args_cli.device
+    if args_cli.random_orn is not None and hasattr(env_cfg, "task") and hasattr(env_cfg.task, "randomize_hand_init_tilt"):
+        env_cfg.task.randomize_hand_init_tilt = True
+        env_cfg.task.hand_init_tilt_noise_deg = args_cli.random_orn
+
+    env_cfg.scene.clone_in_fabric = False
+    if args_cli.video and args_cli.video_src == "pov":
+        _set_default_factory_video_view(env_cfg, args_cli.task)
+
+    checkpoint_path = os.path.abspath(args_cli.checkpoint)
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    print(f"[INFO] Loading offline diffusion checkpoint from: {checkpoint_path}")
+
+    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    if isinstance(env.unwrapped, DirectMARLEnv):
+        env = multi_agent_to_single_agent(env)
+
+    base_env = env.unwrapped
+    max_assessment_steps = None
+    effective_video_length = args_cli.video_length
+    if args_cli.num_loops > 0:
+        steps_per_loop = max(base_env.max_episode_length - 1, 1)
+        max_assessment_steps = args_cli.num_loops * steps_per_loop
+        if args_cli.video:
+            effective_video_length = max_assessment_steps
+        print(
+            f"[INFO] Assessment will stop after {args_cli.num_loops} loop(s): "
+            f"{max_assessment_steps} steps ({steps_per_loop} steps per loop)."
+        )
+
+    if args_cli.video:
+        if args_cli.video_src == "pov":
+            video_kwargs = {
+                "video_folder": os.path.join(os.path.dirname(checkpoint_path), "videos", "offline_diffusion_assess"),
+                "step_trigger": lambda step: step == 0,
+                "video_length": effective_video_length,
+                "disable_logger": True,
+            }
+            print("[INFO] Recording POV videos during assessment.")
+            print_dict(video_kwargs, nesting=4)
+            env = gym.wrappers.RecordVideo(env, **video_kwargs)
+            base_env = env.unwrapped
+            zed_writer = None
+        else:
+            zed_video_dir = os.path.join(os.path.dirname(checkpoint_path), "videos", "offline_diffusion_assess_zed")
+            os.makedirs(zed_video_dir, exist_ok=True)
+            zed_video_path = os.path.join(zed_video_dir, f"{args_cli.task.replace(':', '_')}.mp4")
+            print(f"[INFO] Recording ZED wrist video to: {zed_video_path}")
+            zed_writer = imageio.get_writer(zed_video_path, fps=max(int(round(1.0 / base_env.step_dt)), 1))
+    else:
+        zed_writer = None
+
+    device = torch.device(args_cli.device or env_cfg.sim.device)
+    policy = OfflineDiffusionInferencePolicy(checkpoint_path, device)
+
+    env.reset()
+    policy.reset()
+    timestep = 0
+    completed_loops = 0
+    loop_success_rates = []
+
+    while simulation_app.is_running():
+        start_time = time.time()
+        with torch.inference_mode():
+            actions = policy.act(base_env)
+            _, _, terminated, truncated, extras = env.step(actions)
+            dones = torch.logical_or(terminated, truncated)
+            if zed_writer is not None:
+                zed_batch = base_env._wrist_camera.data.output["rgb"]
+                zed_writer.append_data(_make_zed_grid(zed_batch))
+
+            if len(dones) > 0 and torch.all(dones).item():
+                completed_loops += 1
+                episode_success_rate = _get_episode_success_rate(base_env)
+                final_success_rate = extras.get("successes") if isinstance(extras, dict) else None
+                if final_success_rate is None:
+                    final_success_rate = _get_current_success_rate(base_env)
+
+                episode_text = (
+                    f"episode success rate = {_to_float(episode_success_rate):.4f}"
+                    if episode_success_rate is not None
+                    else "episode success rate = unavailable"
+                )
+                final_text = (
+                    f"final-step success rate = {_to_float(final_success_rate):.4f}"
+                    if final_success_rate is not None
+                    else "final-step success rate = unavailable"
+                )
+                print(f"[INFO] Loop {completed_loops}: {episode_text}, {final_text}")
+                if episode_success_rate is not None:
+                    loop_success_rates.append(episode_success_rate)
+                policy.reset()
+                if args_cli.num_loops > 0 and completed_loops >= args_cli.num_loops:
+                    break
+
+        timestep += 1
+        if max_assessment_steps is not None and timestep >= max_assessment_steps:
+            break
+
+        sleep_time = base_env.step_dt - (time.time() - start_time)
+        if args_cli.real_time and sleep_time > 0:
+            time.sleep(sleep_time)
+
+    if loop_success_rates:
+        mean_success_rate = torch.stack(loop_success_rates).mean()
+        print(f"[INFO] Mean episode success rate over {len(loop_success_rates)} loop(s): {_to_float(mean_success_rate):.4f}")
+
+    if zed_writer is not None:
+        zed_writer.close()
+
+    env.close()
+
+
+if __name__ == "__main__":
+    main()
+    simulation_app.close()
