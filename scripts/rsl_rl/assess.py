@@ -42,12 +42,6 @@ parser.add_argument(
     help="Enable random EE roll/pitch initialization with +/- this many degrees for tasks that support it.",
 )
 parser.add_argument(
-    "--privileged_actor",
-    action="store_true",
-    default=False,
-    help="Feed critic/privileged observations to the actor during assessment.",
-)
-parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
@@ -168,8 +162,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.random_orn is not None and hasattr(env_cfg, "task") and hasattr(env_cfg.task, "randomize_hand_init_tilt"):
         env_cfg.task.randomize_hand_init_tilt = True
         env_cfg.task.hand_init_tilt_noise_deg = args_cli.random_orn
-    if args_cli.privileged_actor:
-        agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
+    agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
 
     # set the environment seed
     env_cfg.seed = agent_cfg.seed
