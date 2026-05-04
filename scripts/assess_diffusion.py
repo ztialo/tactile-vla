@@ -49,6 +49,12 @@ parser.add_argument(
     default=None,
     help="Enable random EE roll/pitch initialization with +/- this many degrees for tasks that support it.",
 )
+parser.add_argument(
+    "--ft",
+    action="store_true",
+    default=False,
+    help="Append left/right 6D FT wrench readings to the low-dimensional state during inference.",
+)
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -124,6 +130,16 @@ def _make_zed_grid(rgb_batch: torch.Tensor):
     return np.concatenate((np.concatenate(top, axis=1), np.concatenate(bottom, axis=1)), axis=0)
 
 
+def _resolve_ft_body_indices(env) -> tuple[object, int, int]:
+    """Resolve the left/right FT body ids on the robot articulation."""
+    robot = env.scene["robot"]
+    left_ids, _ = robot.find_bodies("fr3_left_ft")
+    right_ids, _ = robot.find_bodies("fr3_right_ft")
+    if len(left_ids) == 0 or len(right_ids) == 0:
+        raise ValueError("Could not resolve FT bodies 'fr3_left_ft' and 'fr3_right_ft' on scene['robot'].")
+    return robot, int(left_ids[0]), int(right_ids[0])
+
+
 class OfflineDiffusionInferencePolicy:
     def __init__(self, checkpoint_path: str, device: torch.device):
         checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -161,6 +177,7 @@ class OfflineDiffusionInferencePolicy:
         self.state_center = torch.tensor(stats.get("state_center", stats.get("state_mean")), dtype=torch.float32, device=device)
         self.state_scale = torch.tensor(stats.get("state_scale", stats.get("state_std")), dtype=torch.float32, device=device)
         self.image_normalization = config.get("image_normalization", "minus_one_one")
+        self.use_ft = bool(config.get("ft", False)) or args_cli.ft
         self.scheduler = train_impl._build_diffusion_scheduler(
             SimpleNamespace(
                 scheduler_type=config.get("scheduler_type", "ddim"),
@@ -173,6 +190,9 @@ class OfflineDiffusionInferencePolicy:
         self._state_history = None
         self._action_plan = None
         self._action_step = 0
+        self._robot = None
+        self._left_ft_body_idx = None
+        self._right_ft_body_idx = None
 
     def reset(self):
         self._wrist_history = None
@@ -192,12 +212,23 @@ class OfflineDiffusionInferencePolicy:
             raise ValueError(f"Unsupported image_normalization: {self.image_normalization}")
         return wrist
 
+    def _maybe_init_ft(self, env):
+        if not self.use_ft or self._robot is not None:
+            return
+        self._robot, self._left_ft_body_idx, self._right_ft_body_idx = _resolve_ft_body_indices(env)
+
     def _build_current_obs(self, env) -> tuple[torch.Tensor, torch.Tensor]:
         if env._wrist_camera is None:
             raise RuntimeError("Offline diffusion policy requires wrist camera data, but no wrist camera is configured.")
         wrist = self._normalize_images(env._wrist_camera.data.output["rgb"][..., :3])
         gripper_pos = torch.mean(env.joint_pos[:, 7:], dim=1, keepdim=True)
-        state = torch.cat((env.fingertip_midpoint_pos, env.fingertip_midpoint_quat, gripper_pos), dim=-1)
+        state_parts = [env.fingertip_midpoint_pos, env.fingertip_midpoint_quat, gripper_pos]
+        if self.use_ft:
+            self._maybe_init_ft(env)
+            left_ft_wrench = self._robot.data.body_incoming_joint_wrench_b[:, self._left_ft_body_idx]
+            right_ft_wrench = self._robot.data.body_incoming_joint_wrench_b[:, self._right_ft_body_idx]
+            state_parts.extend((left_ft_wrench, right_ft_wrench))
+        state = torch.cat(state_parts, dim=-1)
         state = (state - self.state_center) / self.state_scale
         return wrist, state
 

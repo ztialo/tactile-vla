@@ -65,7 +65,7 @@ def parse_args():
         "--dataset",
         type=str,
         default=config.get("dataset"),
-        help="Path to HDF5 dataset from scripts/rsl_rl/vision_log.py.",
+        help="Path to HDF5 dataset from scripts/rsl_rl/vision_log.py or visuotactile_log.py.",
     )
     parser.add_argument(
         "--output_dir",
@@ -188,6 +188,12 @@ def parse_args():
     parser.add_argument("--ema_min_value", type=float, default=config.get("ema_min_value", 0.0))
     parser.add_argument("--ema_max_value", type=float, default=config.get("ema_max_value", 0.9999))
     parser.add_argument("--sample_every", type=int, default=config.get("sample_every", 10000))
+    parser.add_argument(
+        "--ft",
+        action="store_true",
+        default=config.get("ft", False),
+        help="Append left/right 6D FT wrench readings to the low-dimensional state.",
+    )
     parser.add_argument(
         "--log_interval",
         type=int,
@@ -399,11 +405,18 @@ def _read_h5_rows(dataset, rows: np.ndarray) -> np.ndarray:
     return block[rows - start]
 
 
-def _state_from_h5(h5_file: h5py.File, rows: np.ndarray) -> np.ndarray:
+def _state_from_h5(h5_file: h5py.File, rows: np.ndarray, use_ft: bool = False) -> np.ndarray:
     eef_pos = np.asarray(_read_h5_rows(h5_file["eef_pos"], rows), dtype=np.float32)
     eef_quat = np.asarray(_read_h5_rows(h5_file["eef_quat"], rows), dtype=np.float32)
     gripper_pos = np.asarray(_read_h5_rows(h5_file["gripper_pos"], rows), dtype=np.float32)
-    return np.concatenate((eef_pos, eef_quat, gripper_pos), axis=-1)
+    state_parts = [eef_pos, eef_quat, gripper_pos]
+    if use_ft:
+        if "left_ft_wrench" not in h5_file or "right_ft_wrench" not in h5_file:
+            raise KeyError("Dataset is missing required FT keys: left_ft_wrench and/or right_ft_wrench")
+        left_ft_wrench = np.asarray(_read_h5_rows(h5_file["left_ft_wrench"], rows), dtype=np.float32)
+        right_ft_wrench = np.asarray(_read_h5_rows(h5_file["right_ft_wrench"], rows), dtype=np.float32)
+        state_parts.extend((left_ft_wrench, right_ft_wrench))
+    return np.concatenate(state_parts, axis=-1)
 
 
 def _load_episode_spans(h5_path: str) -> list[EpisodeSpan]:
@@ -459,6 +472,7 @@ def _compute_stats(
     spans: list[EpisodeSpan],
     rotation_repr: str,
     normalization_mode: str,
+    use_ft: bool,
 ) -> DatasetStats:
     state_sum = None
     state_sq_sum = None
@@ -474,7 +488,7 @@ def _compute_stats(
     with h5py.File(h5_path, "r") as h5_file:
         for span in spans:
             rows = np.arange(span.start, span.end, dtype=np.int64)
-            state = _state_from_h5(h5_file, rows)
+            state = _state_from_h5(h5_file, rows, use_ft=use_ft)
             action = np.asarray(h5_file["action"][rows], dtype=np.float32)
             action_repr = _convert_action_repr_numpy(action, rotation_repr)
 
@@ -542,6 +556,7 @@ class H5SequenceDataset(Dataset):
         action_scale: np.ndarray,
         rotation_repr: str,
         image_normalization: str,
+        use_ft: bool,
     ):
         self.h5_path = h5_path
         self.spans = spans
@@ -553,6 +568,7 @@ class H5SequenceDataset(Dataset):
         self.action_scale = action_scale.astype(np.float32)
         self.rotation_repr = rotation_repr
         self.image_normalization = image_normalization
+        self.use_ft = use_ft
         self._file = None
         self.samples: list[tuple[int, int]] = []
         for episode_idx, span in enumerate(self.spans):
@@ -590,7 +606,7 @@ class H5SequenceDataset(Dataset):
             pass
         else:
             raise ValueError(f"Unsupported image_normalization: {self.image_normalization}")
-        state = _state_from_h5(self._file, obs_rows)
+        state = _state_from_h5(self._file, obs_rows, use_ft=self.use_ft)
         state = (state - self.state_center) / self.state_scale
 
         raw_action = np.asarray(_read_h5_rows(self._file["action"], action_rows), dtype=np.float32)
@@ -1078,6 +1094,7 @@ def _create_dataloaders(args, stats: DatasetStats, train_spans: list[EpisodeSpan
         action_scale,
         args.rotation_repr,
         args.image_normalization,
+        args.ft,
     )
     val_dataset = H5SequenceDataset(
         args.dataset,
@@ -1090,6 +1107,7 @@ def _create_dataloaders(args, stats: DatasetStats, train_spans: list[EpisodeSpan
         action_scale,
         args.rotation_repr,
         args.image_normalization,
+        args.ft,
     )
 
     train_loader = DataLoader(
@@ -1248,7 +1266,7 @@ def main():
         raise ValueError("Training split is empty.")
 
     print(f"[INFO] Episodes: total={len(spans)} train={len(train_spans)} val={len(val_spans)}")
-    stats = _compute_stats(args.dataset, train_spans, args.rotation_repr, args.state_action_normalization)
+    stats = _compute_stats(args.dataset, train_spans, args.rotation_repr, args.state_action_normalization, args.ft)
     state_dim = len(stats.state_center)
     action_dim = len(stats.action_center)
     print(f"[INFO] State dim: {state_dim}")
