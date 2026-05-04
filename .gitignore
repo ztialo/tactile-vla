@@ -26,3 +26,18 @@ logs/
 *.onnx
 
 manifeel/
+
+# Keep logs ignored by default, but allow one tracked RSL-RL run.
+!logs/
+logs/*
+!logs/rsl_rl/
+logs/rsl_rl/*
+!logs/rsl_rl/factory_privileged/
+logs/rsl_rl/factory_privileged/*
+!logs/rsl_rl/factory_privileged/random_orn/
+logs/rsl_rl/factory_privileged/random_orn/*
+!logs/rsl_rl/factory_privileged/random_orn/gear_mesh_5dg_83prc/
+!logs/rsl_rl/factory_privileged/random_orn/gear_mesh_5dg_83prc/**
+!logs/rsl_rl/factory_privileged/random_orn/gear_mesh_5dg_83prc/**/*.pt
+!logs/rsl_rl/factory_privileged/random_orn/gear_mesh_5dg_83prc/**/*.onnx
+!logs/rsl_rl/factory_privileged/random_orn/gear_mesh_5dg_83prc/**/events.out.tfevents.*
