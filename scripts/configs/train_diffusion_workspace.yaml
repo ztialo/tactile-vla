@@ -1,0 +1,78 @@
+defaults:
+  - _self_
+  - task: gear_mesh_vision_wrist
+
+name: train_diffusion_workspace
+output_dir: logs/diffusion/gear_mesh_workspace
+
+n_obs_steps: 2
+horizon: 16
+n_action_steps: 8
+
+policy:
+  vision_encoder: resnet18_gn
+  image_embed_dim: 128
+  obs_feature_dim: 128
+  diffusion_step_embed_dim: 128
+  down_dims: [512, 1024, 2048]
+  kernel_size: 5
+  n_groups: 8
+  cond_predict_scale: true
+  num_inference_steps: 100
+  rotation_repr: rot9d
+  scheduler_type: ddpm
+  num_diffusion_steps: 100
+  prediction_type: epsilon
+
+ema:
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+dataloader:
+  batch_size: 8
+  num_workers: 4
+  shuffle: true
+  pin_memory: true
+  drop_last: false
+
+val_dataloader:
+  batch_size: 8
+  num_workers: 1
+  shuffle: false
+  pin_memory: true
+  drop_last: false
+
+optimizer:
+  lr: 8.0e-5
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-6
+
+training:
+  device: cuda
+  seed: 42
+  resume: false
+  num_epochs: 100
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  gradient_accumulate_every: 1
+  use_ema: true
+  checkpoint_every: 1
+  val_every: 1
+  sample_every: 1
+  max_train_steps: null
+  max_val_steps: null
+
+logging:
+  project: tactile-vla-diffusion
+  mode: offline
+  name: gear_mesh_workspace
+  tags: [diffusion, gear_mesh]
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
