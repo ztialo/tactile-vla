@@ -29,10 +29,11 @@ num_inference_steps: 100
 rotation_repr: rot9d
 vision_encoder: resnet18_gn
 image_normalization: zero_one
+image_crop_size: 180
 image_embed_dim: 128
 obs_feature_dim: 128
 diffusion_step_embed_dim: 128
-down_dims: [256, 512, 1024]
+down_dims: [512, 1024, 2048]
 kernel_size: 5
 n_groups: 8
 cond_predict_scale: true

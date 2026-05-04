@@ -130,6 +130,22 @@ def _make_zed_grid(rgb_batch: torch.Tensor):
     return np.concatenate((np.concatenate(top, axis=1), np.concatenate(bottom, axis=1)), axis=0)
 
 
+def _center_crop_torch(images: torch.Tensor, crop_size: int | None) -> torch.Tensor:
+    """Center crop NHWC image batches to a square size."""
+    if crop_size is None:
+        return images
+    if crop_size <= 0:
+        raise ValueError(f"image_crop_size must be positive when set, got {crop_size}")
+    height, width = images.shape[1:3]
+    if crop_size > height or crop_size > width:
+        raise ValueError(
+            f"image_crop_size={crop_size} exceeds image dimensions {(height, width)}."
+        )
+    top = (height - crop_size) // 2
+    left = (width - crop_size) // 2
+    return images[:, top : top + crop_size, left : left + crop_size, :]
+
+
 def _resolve_ft_body_indices(env) -> tuple[object, int, int]:
     """Resolve the left/right FT body ids on the robot articulation."""
     robot = env.scene["robot"]
@@ -177,6 +193,7 @@ class OfflineDiffusionInferencePolicy:
         self.state_center = torch.tensor(stats.get("state_center", stats.get("state_mean")), dtype=torch.float32, device=device)
         self.state_scale = torch.tensor(stats.get("state_scale", stats.get("state_std")), dtype=torch.float32, device=device)
         self.image_normalization = config.get("image_normalization", "minus_one_one")
+        self.image_crop_size = config.get("image_crop_size")
         self.use_ft = bool(config.get("ft", False)) or args_cli.ft
         self.scheduler = train_impl._build_diffusion_scheduler(
             SimpleNamespace(
@@ -201,6 +218,7 @@ class OfflineDiffusionInferencePolicy:
         self._action_step = 0
 
     def _normalize_images(self, wrist_rgb: torch.Tensor) -> torch.Tensor:
+        wrist_rgb = _center_crop_torch(wrist_rgb, self.image_crop_size)
         wrist = wrist_rgb.float() / 255.0
         if self.image_normalization == "minus_one_one":
             wrist = wrist * 2.0 - 1.0

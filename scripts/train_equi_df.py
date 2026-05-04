@@ -138,6 +138,12 @@ def parse_args():
         choices=["minus_one_one", "imagenet", "zero_one"],
         help="Image normalization applied before the encoder.",
     )
+    parser.add_argument(
+        "--image_crop_size",
+        type=int,
+        default=config.get("image_crop_size"),
+        help="Optional center-crop size applied to wrist RGB before encoding.",
+    )
     parser.add_argument("--image_embed_dim", type=int, default=config.get("image_embed_dim", 128))
     parser.add_argument(
         "--obs_feature_dim",
@@ -405,6 +411,22 @@ def _read_h5_rows(dataset, rows: np.ndarray) -> np.ndarray:
     return block[rows - start]
 
 
+def _center_crop_numpy(images: np.ndarray, crop_size: int | None) -> np.ndarray:
+    """Center crop NHWC image batches to a square size."""
+    if crop_size is None:
+        return images
+    if crop_size <= 0:
+        raise ValueError(f"image_crop_size must be positive when set, got {crop_size}")
+    height, width = images.shape[1:3]
+    if crop_size > height or crop_size > width:
+        raise ValueError(
+            f"image_crop_size={crop_size} exceeds image dimensions {(height, width)}."
+        )
+    top = (height - crop_size) // 2
+    left = (width - crop_size) // 2
+    return images[:, top : top + crop_size, left : left + crop_size, :]
+
+
 def _state_from_h5(h5_file: h5py.File, rows: np.ndarray, use_ft: bool = False) -> np.ndarray:
     eef_pos = np.asarray(_read_h5_rows(h5_file["eef_pos"], rows), dtype=np.float32)
     eef_quat = np.asarray(_read_h5_rows(h5_file["eef_quat"], rows), dtype=np.float32)
@@ -557,6 +579,7 @@ class H5SequenceDataset(Dataset):
         rotation_repr: str,
         image_normalization: str,
         use_ft: bool,
+        image_crop_size: int | None,
     ):
         self.h5_path = h5_path
         self.spans = spans
@@ -569,6 +592,7 @@ class H5SequenceDataset(Dataset):
         self.rotation_repr = rotation_repr
         self.image_normalization = image_normalization
         self.use_ft = use_ft
+        self.image_crop_size = image_crop_size
         self._file = None
         self.samples: list[tuple[int, int]] = []
         for episode_idx, span in enumerate(self.spans):
@@ -595,7 +619,8 @@ class H5SequenceDataset(Dataset):
         action_offsets = np.clip(action_offsets, 0, span.length - 1)
         action_rows = span.start + action_offsets
 
-        wrist = np.asarray(_read_h5_rows(self._file["wrist_rgb"], obs_rows), dtype=np.float32) / 255.0
+        wrist = np.asarray(_read_h5_rows(self._file["wrist_rgb"], obs_rows), dtype=np.float32)
+        wrist = _center_crop_numpy(wrist, self.image_crop_size) / 255.0
         if self.image_normalization == "minus_one_one":
             wrist = wrist * 2.0 - 1.0
         elif self.image_normalization == "imagenet":
@@ -1095,6 +1120,7 @@ def _create_dataloaders(args, stats: DatasetStats, train_spans: list[EpisodeSpan
         args.rotation_repr,
         args.image_normalization,
         args.ft,
+        args.image_crop_size,
     )
     val_dataset = H5SequenceDataset(
         args.dataset,
@@ -1108,6 +1134,7 @@ def _create_dataloaders(args, stats: DatasetStats, train_spans: list[EpisodeSpan
         args.rotation_repr,
         args.image_normalization,
         args.ft,
+        args.image_crop_size,
     )
 
     train_loader = DataLoader(
