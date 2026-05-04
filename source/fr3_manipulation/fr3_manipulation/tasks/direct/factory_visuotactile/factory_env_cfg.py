@@ -125,7 +125,7 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     robot: ArticulationCfg = FR3_FT_WC_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
     wrist_camera: TiledCameraCfg = TiledCameraCfg(
-        prim_path="/World/envs/env_.*/Robot/fr3/fr3_link8/zed_mounted/ZED_X/base_link/ZED_X/CameraLeft",
+        prim_path="/World/envs/env_.*/Robot/fr3/fr3_link8/camera_mount_for_franka_hand/ZED_X/base_link/ZED_X/CameraLeft",
         update_period=0.0,
         height=CAMERA_HEIGHT,
         width=CAMERA_WIDTH,

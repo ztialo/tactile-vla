@@ -19,6 +19,7 @@ events.out.tfevents.*
 
 # Python cache
 **/__pycache__/
+*.pyc
 *.py[cod]
 
 logs/
