@@ -94,8 +94,10 @@ cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
+task_name_cli = args_cli.task or ""
+is_visuo_task = ("Visuomotor" in task_name_cli) or ("Visuotactile" in task_name_cli)
 # always enable cameras to record video or visuotactile rollouts
-if args_cli.video or (args_cli.log_path and not args_cli.no_log_images) or "Visuomotor" in (args_cli.task or ""):
+if args_cli.video or (args_cli.log_path and not args_cli.no_log_images) or is_visuo_task:
     args_cli.enable_cameras = True
 
 # clear out sys.argv for Hydra
@@ -306,10 +308,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     robot, left_ft_body_idx, right_ft_body_idx = _resolve_ft_body_indices(base_env)
 
     if agent_cfg.class_name == "DistillationRunner":
-        if "Visuomotor-" not in args_cli.task:
-            raise ValueError("DistillationRunner fallback is only supported for visuomotor teacher data collection.")
-
-        teacher_task = args_cli.task.replace("Visuomotor-", "Privileged-")
+        if args_cli.task is None:
+            raise ValueError("DistillationRunner fallback requires a task name.")
+        if args_cli.task.startswith("Visuomotor-"):
+            teacher_task = args_cli.task.replace("Visuomotor-", "Privileged-", 1)
+        elif args_cli.task.startswith("Visuotactile-"):
+            teacher_task = args_cli.task.replace("Visuotactile-", "Privileged-", 1)
+        else:
+            raise ValueError(
+                "DistillationRunner fallback is only supported for Visuomotor-* or Visuotactile-* teacher data collection."
+            )
         teacher_agent_cfg = cli_args.parse_rsl_rl_cfg(teacher_task, args_cli)
         if args_cli.privileged_actor:
             teacher_agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
