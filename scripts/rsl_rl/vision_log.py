@@ -71,6 +71,12 @@ parser.add_argument(
     help="Skip wrist RGB image logging and only log state/action labels.",
 )
 parser.add_argument(
+    "--log_depth",
+    action="store_true",
+    default=False,
+    help="Also log wrist depth as distance_to_image_plane.",
+)
+parser.add_argument(
     "--progress_interval",
     type=int,
     default=100,
@@ -268,6 +274,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     if args_cli.no_log_images and hasattr(env_cfg, "wrist_camera"):
         env_cfg.wrist_camera = None
+    elif args_cli.log_depth and hasattr(env_cfg, "wrist_camera") and env_cfg.wrist_camera is not None:
+        data_types = list(getattr(env_cfg.wrist_camera, "data_types", []))
+        if "distance_to_image_plane" not in data_types:
+            data_types.append("distance_to_image_plane")
+        env_cfg.wrist_camera.data_types = data_types
     elif hasattr(env_cfg, "scene") and hasattr(env_cfg.scene, "clone_in_fabric"):
         env_cfg.scene.clone_in_fabric = False
 
@@ -393,6 +404,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         h5_file.attrs["logged_env_ids"] = _tensor_to_numpy(log_env_ids, dtype=np.int64)
         h5_file.attrs["action_order"] = "dx,dy,dz,droll,dpitch,dyaw"
         h5_file.attrs["quat_order"] = "w,x,y,z"
+        if args_cli.log_depth:
+            h5_file.attrs["depth_key"] = "distance_to_image_plane"
         h5_file.attrs["log_success_only"] = args_cli.log_success_only
         h5_file.attrs["successful_episodes_target"] = args_cli.successful_episodes_target
         print(f"[INFO] Vision rollout HDF5 log: {os.path.abspath(args_cli.log_path)}")
@@ -443,6 +456,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         else:
                             wrist_rgb = wrist_rgb.to(torch.uint8)
                         batch["wrist_rgb"] = _tensor_to_numpy(wrist_rgb, log_env_ids)
+                        if args_cli.log_depth:
+                            if "distance_to_image_plane" not in base_env._wrist_camera.data.output:
+                                raise KeyError(
+                                    "Depth logging requested, but wrist camera has no 'distance_to_image_plane' output."
+                                )
+                            wrist_depth = base_env._wrist_camera.data.output["distance_to_image_plane"]
+                            wrist_depth = torch.nan_to_num(
+                                wrist_depth,
+                                nan=0.0,
+                                posinf=0.0,
+                                neginf=0.0,
+                            ).to(torch.float32)
+                            batch["wrist_depth"] = _tensor_to_numpy(wrist_depth, log_env_ids, dtype=np.float32)
                     if args_cli.log_success_only:
                         active_mask = ~suppress_after_success[log_env_ids].detach().cpu().numpy()
                         if np.any(active_mask):

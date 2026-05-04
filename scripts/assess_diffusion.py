@@ -159,7 +159,7 @@ def _resolve_ft_body_indices(env) -> tuple[object, int, int]:
 class OfflineDiffusionInferencePolicy:
     def __init__(self, checkpoint_path: str, device: torch.device):
         checkpoint = torch.load(checkpoint_path, map_location=device)
-        config = checkpoint["config"]
+        config = self._resolve_config(checkpoint)
         stats = checkpoint["stats"]
 
         self.config = config
@@ -210,6 +210,42 @@ class OfflineDiffusionInferencePolicy:
         self._robot = None
         self._left_ft_body_idx = None
         self._right_ft_body_idx = None
+
+    @staticmethod
+    def _resolve_config(checkpoint: dict) -> dict:
+        """Normalize old flat configs and new workspace configs into one flat dict."""
+        config = checkpoint["config"]
+        if "state_dim" in config and "action_dim" in config:
+            return config
+
+        if "policy" not in config:
+            raise KeyError("Checkpoint config is missing both flat model keys and a 'policy' section.")
+
+        stats = checkpoint["stats"]
+        resolved = {
+            "state_dim": len(stats.get("state_center", stats.get("state_mean"))),
+            "action_dim": len(stats.get("action_center", stats.get("action_std"))),
+            "n_obs_steps": config["n_obs_steps"],
+            "horizon": config["horizon"],
+            "n_action_steps": config["n_action_steps"],
+            "image_embed_dim": config["policy"]["image_embed_dim"],
+            "obs_feature_dim": config["policy"]["obs_feature_dim"],
+            "vision_encoder": config["policy"]["vision_encoder"],
+            "diffusion_step_embed_dim": config["policy"]["diffusion_step_embed_dim"],
+            "down_dims": config["policy"]["down_dims"],
+            "kernel_size": config["policy"]["kernel_size"],
+            "n_groups": config["policy"]["n_groups"],
+            "num_inference_steps": config["policy"]["num_inference_steps"],
+            "cond_predict_scale": config["policy"].get("cond_predict_scale", True),
+            "rotation_repr": config["policy"]["rotation_repr"],
+            "scheduler_type": config["policy"].get("scheduler_type", "ddpm"),
+            "num_diffusion_steps": config["policy"]["num_diffusion_steps"],
+            "prediction_type": config["policy"]["prediction_type"],
+            "image_normalization": config["task"]["dataset"]["image_normalization"],
+            "image_crop_size": config["task"]["dataset"].get("image_crop_size"),
+            "ft": config["task"]["dataset"].get("ft", False),
+        }
+        return resolved
 
     def reset(self):
         self._wrist_history = None
