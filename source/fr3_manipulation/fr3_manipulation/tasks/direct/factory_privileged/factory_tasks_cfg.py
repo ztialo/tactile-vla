@@ -3,12 +3,15 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import os
+
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 
 ASSET_DIR = f"{ISAACLAB_NUCLEUS_DIR}/Factory"
+LOCAL_ASSET_DIR = os.path.join(os.path.dirname(__file__), "..", "assets")
 
 
 @configclass
@@ -187,7 +190,7 @@ class PegInsert(FactoryTask):
 
 @configclass
 class GearBase(FixedAssetCfg):
-    usd_path = f"{ASSET_DIR}/factory_gear_base.usd"
+    usd_path = os.path.join(LOCAL_ASSET_DIR, "factory_gear_base.usd")
     height = 0.02
     base_height = 0.005
     small_gear_base_offset = [5.075e-2, 0.0, 0.0]
@@ -197,7 +200,7 @@ class GearBase(FixedAssetCfg):
 
 @configclass
 class MediumGear(HeldAssetCfg):
-    usd_path = f"{ASSET_DIR}/factory_gear_medium.usd"
+    usd_path = os.path.join(LOCAL_ASSET_DIR, "factory_gear_medium.usd")
     diameter = 0.03  # Used for gripper width.
     height: float = 0.03
     mass = 0.012
@@ -210,8 +213,8 @@ class GearMesh(FactoryTask):
     held_asset_cfg = MediumGear()
     duration_s = 20.0
 
-    small_gear_usd = f"{ASSET_DIR}/factory_gear_small.usd"
-    large_gear_usd = f"{ASSET_DIR}/factory_gear_large.usd"
+    small_gear_usd = os.path.join(LOCAL_ASSET_DIR, "factory_gear_small.usd")
+    large_gear_usd = os.path.join(LOCAL_ASSET_DIR, "factory_gear_large.usd")
 
     small_gear_cfg: ArticulationCfg = ArticulationCfg(
         prim_path="/World/envs/env_.*/SmallGearAsset",
