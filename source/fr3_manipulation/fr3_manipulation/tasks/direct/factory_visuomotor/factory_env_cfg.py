@@ -14,8 +14,8 @@ from isaaclab.utils import configclass
 from ..robots.fr3_wc_cfg import FR3_WC_CFG
 from .factory_tasks_cfg import FactoryTask, GearMesh, NutThread, PegInsert
 
-CAMERA_HEIGHT = 180
-CAMERA_WIDTH = 320
+CAMERA_HEIGHT = 320
+CAMERA_WIDTH = 400
 IMAGE_EMBED_DIM = 256
 PROPRIO_DIM = 16  # joint_pos(7) + gripper_pos(1) + prev_action(8)
 PREV_ACTION_DIM = 8

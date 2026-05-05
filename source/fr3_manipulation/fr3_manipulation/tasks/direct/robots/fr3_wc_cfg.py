@@ -9,7 +9,7 @@ config file for the Franka 3 wrist camera setup
 
 BASE_DIR = os.path.dirname(__file__)
 ASSET_DIR = os.path.join(BASE_DIR, "usd")
-FR3_WC_USD_PATH = os.path.join(ASSET_DIR, "fr3_wc.usd")
+FR3_WC_USD_PATH = os.path.join(ASSET_DIR, "fr3_wc_test_angle.usd")
 
 
 FR3_WC_CFG = ArticulationCfg(
