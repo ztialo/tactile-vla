@@ -22,7 +22,7 @@ parser.add_argument("--video_length", type=int, default=200, help="Length of the
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
-parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
+parser.add_argument("--num_envs", type=int, default=32, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
@@ -83,6 +83,18 @@ parser.add_argument(
     help="Print logging progress every N simulator steps. Use 0 to disable periodic progress prints.",
 )
 parser.add_argument(
+    "--action_scale",
+    type=float,
+    default=1.0,
+    help="Multiply policy actions by this factor before stepping the env. Values < 1 slow the policy down.",
+)
+parser.add_argument(
+    "--action_smoothing_alpha",
+    type=float,
+    default=1.0,
+    help="Low-pass smoothing factor for actions in [0, 1]. 1.0 disables smoothing.",
+)
+parser.add_argument(
     "--log_success_only",
     action="store_true",
     default=False,
@@ -93,6 +105,18 @@ parser.add_argument(
     type=int,
     default=0,
     help="Stop after writing this many successful episodes. Use 0 to disable the success-count stop condition.",
+)
+parser.add_argument(
+    "--success_tail_seconds",
+    type=float,
+    default=2.0,
+    help="After first success, keep logging this many additional seconds before truncating and writing the episode.",
+)
+parser.add_argument(
+    "--pre_action_wait_seconds",
+    type=float,
+    default=1.0,
+    help="Hold the robot still for this many seconds at the start of each episode before running the policy.",
 )
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -234,6 +258,18 @@ def _format_duration(seconds: float) -> str:
     hours, remainder = divmod(total_seconds, 3600)
     minutes, secs = divmod(remainder, 60)
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _center_bottom_crop(image: torch.Tensor, crop_height: int, crop_width: int) -> torch.Tensor:
+    """Crop an NHWC image tensor to a bottom-aligned centered window."""
+    height, width = image.shape[-3], image.shape[-2]
+    if crop_height > height or crop_width > width:
+        raise ValueError(
+            f"Requested crop ({crop_height}, {crop_width}) exceeds image size ({height}, {width})."
+        )
+    top = height - crop_height
+    left = (width - crop_width) // 2
+    return image[..., top : top + crop_height, left : left + crop_width, :]
 
 
 def _compute_teacher_policy_obs(base_env) -> torch.Tensor:
@@ -390,6 +426,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     total_samples_written = 0
     total_episodes_finished = 0
     total_successful_episodes_written = 0
+    if not (0.0 <= args_cli.action_smoothing_alpha <= 1.0):
+        raise ValueError("--action_smoothing_alpha must be in [0, 1].")
+    if args_cli.action_scale <= 0.0:
+        raise ValueError("--action_scale must be > 0.")
+    last_actions = None
     if args_cli.log_path:
         os.makedirs(os.path.dirname(os.path.abspath(args_cli.log_path)), exist_ok=True)
         h5_file = h5py.File(args_cli.log_path, "w")
@@ -398,6 +439,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if args_cli.log_success_only:
             episode_rows = {int(env_id): [] for env_id in log_env_ids.detach().cpu().tolist()}
             suppress_after_success = torch.zeros(base_env.num_envs, dtype=torch.bool, device=base_env.device)
+            pending_success = torch.zeros(base_env.num_envs, dtype=torch.bool, device=base_env.device)
+            success_tail_remaining = torch.zeros(base_env.num_envs, dtype=torch.int64, device=base_env.device)
+            success_tail_steps = max(int(round(args_cli.success_tail_seconds / dt)), 0)
+        pre_action_wait_steps = max(int(round(args_cli.pre_action_wait_seconds / dt)), 0)
+        rgb_crop_height = 256
+        rgb_crop_width = 256
         h5_file.attrs["task"] = args_cli.task
         h5_file.attrs["checkpoint"] = resume_path
         h5_file.attrs["num_envs"] = base_env.num_envs
@@ -408,6 +455,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             h5_file.attrs["depth_key"] = "distance_to_image_plane"
         h5_file.attrs["log_success_only"] = args_cli.log_success_only
         h5_file.attrs["successful_episodes_target"] = args_cli.successful_episodes_target
+        h5_file.attrs["success_tail_seconds"] = args_cli.success_tail_seconds
+        h5_file.attrs["pre_action_wait_seconds"] = args_cli.pre_action_wait_seconds
+        h5_file.attrs["wrist_rgb_crop"] = "centerbottom_256x256"
         print(f"[INFO] Vision rollout HDF5 log: {os.path.abspath(args_cli.log_path)}")
         print(f"[INFO] Logging env ids: {h5_file.attrs['logged_env_ids'].tolist()}")
 
@@ -424,7 +474,27 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 if args_cli.log_success_only and hasattr(base_env, "ep_succeeded"):
                     prev_ep_succeeded = base_env.ep_succeeded.clone().to(dtype=torch.bool)
                 # agent stepping
-                actions = policy(obs)
+                raw_actions = policy(obs) * args_cli.action_scale
+                hold_mask = None
+                if h5_file is not None:
+                    hold_mask = timestep_in_episode < pre_action_wait_steps
+                    if args_cli.log_success_only:
+                        hold_mask = torch.logical_or(hold_mask, pending_success)
+                if hold_mask is not None and torch.any(hold_mask):
+                    raw_actions = raw_actions.clone()
+                    raw_actions[hold_mask] = 0.0
+                if last_actions is None or args_cli.action_smoothing_alpha >= 1.0:
+                    actions = raw_actions
+                else:
+                    # First-order low-pass filter: smooth high-frequency action changes.
+                    actions = (
+                        args_cli.action_smoothing_alpha * raw_actions
+                        + (1.0 - args_cli.action_smoothing_alpha) * last_actions
+                    )
+                if hold_mask is not None and torch.any(hold_mask):
+                    actions = actions.clone()
+                    actions[hold_mask] = 0.0
+                last_actions = actions
                 # env stepping
                 obs, _, dones, extras = env.step(actions)
                 # reset recurrent states for episodes that have terminated
@@ -455,6 +525,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             wrist_rgb = torch.clamp(wrist_rgb * 255.0, 0.0, 255.0).to(torch.uint8)
                         else:
                             wrist_rgb = wrist_rgb.to(torch.uint8)
+                        wrist_rgb = _center_bottom_crop(wrist_rgb, rgb_crop_height, rgb_crop_width)
                         batch["wrist_rgb"] = _tensor_to_numpy(wrist_rgb, log_env_ids)
                         if args_cli.log_depth:
                             if "distance_to_image_plane" not in base_env._wrist_camera.data.output:
@@ -468,6 +539,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                                 posinf=0.0,
                                 neginf=0.0,
                             ).to(torch.float32)
+                            wrist_depth = wrist_depth.unsqueeze(-1)
+                            wrist_depth = _center_bottom_crop(wrist_depth, rgb_crop_height, rgb_crop_width).squeeze(-1)
                             batch["wrist_depth"] = _tensor_to_numpy(wrist_depth, log_env_ids, dtype=np.float32)
                     if args_cli.log_success_only:
                         active_mask = ~suppress_after_success[log_env_ids].detach().cpu().numpy()
@@ -491,26 +564,53 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             env_id = int(env_id_tensor.item())
                             if (
                                 args_cli.successful_episodes_target > 0
-                                and total_successful_episodes_written >= args_cli.successful_episodes_target
+                                and (
+                                    total_successful_episodes_written
+                                    + int(torch.count_nonzero(pending_success).item())
+                                )
+                                >= args_cli.successful_episodes_target
                             ):
                                 episode_rows[env_id].clear()
                                 suppress_after_success[env_id] = True
                                 continue
-                            total_samples_written += _flush_episode_rows(
-                                h5_file, episode_rows[env_id], force_terminal=True
-                            )
-                            total_successful_episodes_written += 1
-                            episode_rows[env_id].clear()
-                            suppress_after_success[env_id] = True
-                            h5_file.flush()
+                            pending_success[env_id] = True
+                            success_tail_remaining[env_id] = success_tail_steps
+
+                        pending_logged = pending_success[log_env_ids]
+                        if torch.any(pending_logged):
+                            pending_logged_env_ids = log_env_ids[pending_logged]
+                            success_tail_remaining[pending_logged_env_ids] -= 1
+                            ready_env_ids = pending_logged_env_ids[success_tail_remaining[pending_logged_env_ids] <= 0]
+                            for env_id_tensor in ready_env_ids:
+                                env_id = int(env_id_tensor.item())
+                                total_samples_written += _flush_episode_rows(
+                                    h5_file, episode_rows[env_id], force_terminal=True
+                                )
+                                total_successful_episodes_written += 1
+                                episode_rows[env_id].clear()
+                                pending_success[env_id] = False
+                                success_tail_remaining[env_id] = 0
+                                suppress_after_success[env_id] = True
+                            if len(ready_env_ids) > 0:
+                                h5_file.flush()
                     if torch.any(dones_mask):
                         total_episodes_finished += int(torch.count_nonzero(dones_mask).item())
+                        if last_actions is not None:
+                            last_actions[dones_mask] = 0.0
                         if args_cli.log_success_only:
                             done_env_ids = log_env_ids[dones_mask[log_env_ids]]
                             for env_id_tensor in done_env_ids:
                                 env_id = int(env_id_tensor.item())
+                                if pending_success[env_id]:
+                                    total_samples_written += _flush_episode_rows(
+                                        h5_file, episode_rows[env_id], force_terminal=True
+                                    )
+                                    total_successful_episodes_written += 1
                                 episode_rows[env_id].clear()
+                                pending_success[env_id] = False
+                                success_tail_remaining[env_id] = 0
                             suppress_after_success[dones_mask] = False
+                            h5_file.flush()
                         timestep_in_episode[dones_mask] = 0
 
             if args_cli.video:
