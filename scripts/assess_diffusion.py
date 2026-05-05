@@ -30,8 +30,8 @@ parser.add_argument(
     "--video_src",
     type=str,
     default="pov",
-    choices=["pov", "zed"],
-    help="Video source: `pov` records the viewer perspective, `zed` records the wrist camera stream.",
+    choices=["pov", "zed", "both"],
+    help="Video source: `pov` records the viewer perspective, `zed` records the wrist camera stream, `both` writes a side-by-side POV+wrist video.",
 )
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument(
@@ -117,6 +117,15 @@ def _to_uint8_rgb(frame: torch.Tensor):
     return frame.numpy()
 
 
+def _to_uint8_rgb_array(frame) -> np.ndarray:
+    if isinstance(frame, torch.Tensor):
+        return _to_uint8_rgb(frame)
+    frame = np.asarray(frame)
+    if frame.dtype != np.uint8:
+        frame = np.clip(frame, 0, 255).astype(np.uint8)
+    return frame
+
+
 def _make_zed_grid(rgb_batch: torch.Tensor):
     frames = [_to_uint8_rgb(rgb_batch[i, ..., :3]) for i in range(min(rgb_batch.shape[0], 10))]
     if not frames:
@@ -128,6 +137,26 @@ def _make_zed_grid(rgb_batch: torch.Tensor):
     top = frames[0:5]
     bottom = frames[5:10]
     return np.concatenate((np.concatenate(top, axis=1), np.concatenate(bottom, axis=1)), axis=0)
+
+
+def _center_crop_numpy(frame: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+    height, width = frame.shape[:2]
+    if target_h > height or target_w > width:
+        raise ValueError(
+            f"Cannot crop frame of size {(height, width)} to larger target {(target_h, target_w)}."
+        )
+    top = (height - target_h) // 2
+    left = (width - target_w) // 2
+    return frame[top : top + target_h, left : left + target_w, :]
+
+
+def _make_pov_wrist_side_by_side(pov_frame, wrist_rgb_batch: torch.Tensor) -> np.ndarray:
+    pov = _to_uint8_rgb_array(pov_frame)
+    wrist = _to_uint8_rgb(wrist_rgb_batch[0, ..., :3])
+    wrist_h, wrist_w = wrist.shape[:2]
+    if pov.shape[0] != wrist_h or pov.shape[1] != wrist_w:
+        pov = _center_crop_numpy(pov, wrist_h, wrist_w)
+    return np.concatenate((pov, wrist), axis=1)
 
 
 def _center_crop_torch(images: torch.Tensor, crop_size: int | None) -> torch.Tensor:
@@ -323,7 +352,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.task.hand_init_tilt_noise_deg = args_cli.random_orn
 
     env_cfg.scene.clone_in_fabric = False
-    if args_cli.video and args_cli.video_src == "pov":
+    if args_cli.video and args_cli.video_src in ("pov", "both"):
         _set_default_factory_video_view(env_cfg, args_cli.task)
 
     checkpoint_path = os.path.abspath(args_cli.checkpoint)
@@ -361,14 +390,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             env = gym.wrappers.RecordVideo(env, **video_kwargs)
             base_env = env.unwrapped
             zed_writer = None
+            both_writer = None
+        elif args_cli.video_src == "both":
+            both_video_dir = os.path.join(os.path.dirname(checkpoint_path), "videos", "offline_diffusion_assess_both")
+            os.makedirs(both_video_dir, exist_ok=True)
+            both_video_path = os.path.join(both_video_dir, f"{args_cli.task.replace(':', '_')}.mp4")
+            print(f"[INFO] Recording side-by-side POV+wrist video to: {both_video_path}")
+            both_writer = imageio.get_writer(both_video_path, fps=max(int(round(1.0 / base_env.step_dt)), 1))
+            zed_writer = None
         else:
             zed_video_dir = os.path.join(os.path.dirname(checkpoint_path), "videos", "offline_diffusion_assess_zed")
             os.makedirs(zed_video_dir, exist_ok=True)
             zed_video_path = os.path.join(zed_video_dir, f"{args_cli.task.replace(':', '_')}.mp4")
             print(f"[INFO] Recording ZED wrist video to: {zed_video_path}")
             zed_writer = imageio.get_writer(zed_video_path, fps=max(int(round(1.0 / base_env.step_dt)), 1))
+            both_writer = None
     else:
         zed_writer = None
+        both_writer = None
 
     device = torch.device(args_cli.device or env_cfg.sim.device)
     policy = OfflineDiffusionInferencePolicy(checkpoint_path, device)
@@ -388,6 +427,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if zed_writer is not None:
                 zed_batch = base_env._wrist_camera.data.output["rgb"]
                 zed_writer.append_data(_make_zed_grid(zed_batch))
+            if both_writer is not None:
+                pov_frame = env.render()
+                wrist_batch = base_env._wrist_camera.data.output["rgb"]
+                both_writer.append_data(_make_pov_wrist_side_by_side(pov_frame, wrist_batch))
 
             if len(dones) > 0 and torch.all(dones).item():
                 completed_loops += 1
@@ -427,6 +470,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     if zed_writer is not None:
         zed_writer.close()
+    if both_writer is not None:
+        both_writer.close()
 
     env.close()
 

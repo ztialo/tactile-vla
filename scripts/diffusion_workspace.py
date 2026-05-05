@@ -327,6 +327,7 @@ class TrainDiffusionUnetImageWorkspace:
 
         train_sampling_batch = None
         run_start = time.time()
+        session_start_epoch = self.epoch
         log_path = output_dir / "logs.jsonl"
         with JsonlLogger(log_path) as json_logger:
             for epoch in range(self.epoch, int(cfg.training.num_epochs)):
@@ -387,6 +388,11 @@ class TrainDiffusionUnetImageWorkspace:
                     "epoch_time": time.time() - epoch_start,
                     "run_elapsed": time.time() - run_start,
                 }
+                completed_session_epochs = max((epoch - session_start_epoch + 1), 1)
+                avg_epoch_time = step_log["run_elapsed"] / completed_session_epochs
+                remaining_epochs = max(int(cfg.training.num_epochs) - (epoch + 1), 0)
+                step_log["eta_seconds"] = avg_epoch_time * remaining_epochs
+                step_log["eta_hms"] = train_impl._format_duration(step_log["eta_seconds"])
                 if epoch % int(cfg.training.sample_every) == 0 and train_sampling_batch is not None:
                     eval_model.eval()
                     with torch.inference_mode():
@@ -404,7 +410,9 @@ class TrainDiffusionUnetImageWorkspace:
 
                 self._save_checkpoint(latest_path, model, ema, optimizer, lr_scheduler, history, best_val, stats)
                 epoch_ckpt = checkpoint_dir / f"epoch_{epoch + 1:03d}.pt"
-                if epoch % int(cfg.training.checkpoint_every) == 0:
+                if bool(getattr(cfg.training, "save_epoch_checkpoints", False)) and (
+                    epoch % int(cfg.training.checkpoint_every) == 0
+                ):
                     self._save_checkpoint(epoch_ckpt, model, ema, optimizer, lr_scheduler, history, best_val, stats)
                 if val_loss <= best_val:
                     best_val = val_loss
@@ -417,7 +425,8 @@ class TrainDiffusionUnetImageWorkspace:
                     f"[INFO] Epoch {epoch + 1:03d}: train_loss={train_loss:.6f} "
                     f"val_loss={val_loss:.6f} lr={optimizer.param_groups[0]['lr']:.6e} "
                     f"epoch_time={train_impl._format_duration(step_log['epoch_time'])} "
-                    f"run_elapsed={train_impl._format_duration(step_log['run_elapsed'])}"
+                    f"run_elapsed={train_impl._format_duration(step_log['run_elapsed'])} "
+                    f"eta={step_log['eta_hms']}"
                 )
 
         if wandb_run is not None:

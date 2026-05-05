@@ -69,6 +69,17 @@ class CtrlCfg:
 
 
 @configclass
+class SlowCtrlCfg(CtrlCfg):
+    """Slower controller mapping for training a lower-speed teacher."""
+
+    pos_action_bounds = [0.02, 0.02, 0.02]
+    rot_action_bounds = [0.4, 0.4, 0.4]
+
+    pos_action_threshold = [0.008, 0.008, 0.008]
+    rot_action_threshold = [0.0388, 0.0388, 0.0388]
+
+
+@configclass
 class FactoryEnvCfg(DirectRLEnvCfg):
     decimation = 8
     action_space = 6
@@ -136,6 +147,14 @@ class FactoryTaskGearMeshCfg(FactoryEnvCfg):
     task_name = "gear_mesh"
     task = GearMesh()
     episode_length_s = 20.0
+
+
+@configclass
+class FactoryTaskGearMeshSlowCfg(FactoryEnvCfg):
+    task_name = "gear_mesh"
+    task = GearMesh()
+    ctrl: SlowCtrlCfg = SlowCtrlCfg()
+    episode_length_s = 60.0
 
 
 @configclass
