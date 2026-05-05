@@ -109,7 +109,7 @@ parser.add_argument(
 parser.add_argument(
     "--success_tail_seconds",
     type=float,
-    default=2.0,
+    default=1.0,
     help="After first success, keep logging this many additional seconds before truncating and writing the episode.",
 )
 parser.add_argument(
