@@ -3,7 +3,7 @@ name: gear_mesh_vision_wrist
 shape_meta:
   obs:
     wrist:
-      shape: [3, 180, 180]
+      shape: [3, 256, 256]
       type: rgb
     state:
       shape: [8]
@@ -19,5 +19,5 @@ dataset:
   max_val_episodes: 0
   state_action_normalization: limits
   image_normalization: zero_one
-  image_crop_size: 180
+  image_crop_size: 256
   ft: false

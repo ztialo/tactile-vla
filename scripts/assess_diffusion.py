@@ -85,7 +85,7 @@ def _set_default_factory_video_view(env_cfg, task_name: str | None):
     if not hasattr(env_cfg, "viewer") or env_cfg.viewer is None:
         return
     if hasattr(env_cfg.viewer, "eye"):
-        env_cfg.viewer.eye = (1.4, -0.015, 0.28)
+        env_cfg.viewer.eye = (1.7, -0.02, 0.34)
     if hasattr(env_cfg.viewer, "lookat"):
         env_cfg.viewer.lookat = (0.60, 0.00, 0.12)
 
@@ -126,8 +126,12 @@ def _to_uint8_rgb_array(frame) -> np.ndarray:
     return frame
 
 
-def _make_zed_grid(rgb_batch: torch.Tensor):
-    frames = [_to_uint8_rgb(rgb_batch[i, ..., :3]) for i in range(min(rgb_batch.shape[0], 10))]
+def _make_zed_grid(rgb_batch: torch.Tensor, crop_size: int | None = None):
+    if crop_size is not None:
+        rgb_batch = _center_crop_torch(rgb_batch[..., :3], crop_size)
+    else:
+        rgb_batch = rgb_batch[..., :3]
+    frames = [_to_uint8_rgb(rgb_batch[i]) for i in range(min(rgb_batch.shape[0], 10))]
     if not frames:
         raise RuntimeError("No wrist camera frames available for ZED video recording.")
     frame_h, frame_w, frame_c = frames[0].shape
@@ -150,9 +154,15 @@ def _center_crop_numpy(frame: np.ndarray, target_h: int, target_w: int) -> np.nd
     return frame[top : top + target_h, left : left + target_w, :]
 
 
-def _make_pov_wrist_side_by_side(pov_frame, wrist_rgb_batch: torch.Tensor) -> np.ndarray:
+def _make_pov_wrist_side_by_side(
+    pov_frame, wrist_rgb_batch: torch.Tensor, crop_size: int | None = None
+) -> np.ndarray:
     pov = _to_uint8_rgb_array(pov_frame)
-    wrist = _to_uint8_rgb(wrist_rgb_batch[0, ..., :3])
+    if crop_size is not None:
+        wrist_rgb_batch = _center_crop_torch(wrist_rgb_batch[..., :3], crop_size)
+    else:
+        wrist_rgb_batch = wrist_rgb_batch[..., :3]
+    wrist = _to_uint8_rgb(wrist_rgb_batch[0])
     wrist_h, wrist_w = wrist.shape[:2]
     if pov.shape[0] != wrist_h or pov.shape[1] != wrist_w:
         pov = _center_crop_numpy(pov, wrist_h, wrist_w)
@@ -359,6 +369,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     print(f"[INFO] Loading offline diffusion checkpoint from: {checkpoint_path}")
+    checkpoint_dir = os.path.dirname(checkpoint_path)
+    video_root = os.path.dirname(checkpoint_dir) if os.path.basename(checkpoint_dir) == "checkpoints" else checkpoint_dir
 
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     if isinstance(env.unwrapped, DirectMARLEnv):
@@ -378,9 +390,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         )
 
     if args_cli.video:
+        video_dir = os.path.join(video_root, "videos")
+        os.makedirs(video_dir, exist_ok=True)
         if args_cli.video_src == "pov":
             video_kwargs = {
-                "video_folder": os.path.join(os.path.dirname(checkpoint_path), "videos", "offline_diffusion_assess"),
+                "video_folder": video_dir,
                 "step_trigger": lambda step: step == 0,
                 "video_length": effective_video_length,
                 "disable_logger": True,
@@ -392,16 +406,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             zed_writer = None
             both_writer = None
         elif args_cli.video_src == "both":
-            both_video_dir = os.path.join(os.path.dirname(checkpoint_path), "videos", "offline_diffusion_assess_both")
-            os.makedirs(both_video_dir, exist_ok=True)
-            both_video_path = os.path.join(both_video_dir, f"{args_cli.task.replace(':', '_')}.mp4")
+            both_video_path = os.path.join(video_dir, f"{args_cli.task.replace(':', '_')}_both.mp4")
             print(f"[INFO] Recording side-by-side POV+wrist video to: {both_video_path}")
             both_writer = imageio.get_writer(both_video_path, fps=max(int(round(1.0 / base_env.step_dt)), 1))
             zed_writer = None
         else:
-            zed_video_dir = os.path.join(os.path.dirname(checkpoint_path), "videos", "offline_diffusion_assess_zed")
-            os.makedirs(zed_video_dir, exist_ok=True)
-            zed_video_path = os.path.join(zed_video_dir, f"{args_cli.task.replace(':', '_')}.mp4")
+            zed_video_path = os.path.join(video_dir, f"{args_cli.task.replace(':', '_')}_zed.mp4")
             print(f"[INFO] Recording ZED wrist video to: {zed_video_path}")
             zed_writer = imageio.get_writer(zed_video_path, fps=max(int(round(1.0 / base_env.step_dt)), 1))
             both_writer = None
@@ -426,11 +436,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             dones = torch.logical_or(terminated, truncated)
             if zed_writer is not None:
                 zed_batch = base_env._wrist_camera.data.output["rgb"]
-                zed_writer.append_data(_make_zed_grid(zed_batch))
+                zed_writer.append_data(_make_zed_grid(zed_batch, policy.image_crop_size))
             if both_writer is not None:
                 pov_frame = env.render()
                 wrist_batch = base_env._wrist_camera.data.output["rgb"]
-                both_writer.append_data(_make_pov_wrist_side_by_side(pov_frame, wrist_batch))
+                both_writer.append_data(_make_pov_wrist_side_by_side(pov_frame, wrist_batch, policy.image_crop_size))
 
             if len(dones) > 0 and torch.all(dones).item():
                 completed_loops += 1
