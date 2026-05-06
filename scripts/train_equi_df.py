@@ -710,19 +710,20 @@ class ResNet18GroupNormEncoder(nn.Module):
         super().__init__()
         norm_layer = functools.partial(nn.GroupNorm, 32)
         backbone = models.resnet18(weights=None, norm_layer=norm_layer)
-        backbone.fc = nn.Identity()
-        self.backbone = backbone
+        self.backbone = nn.Sequential(*list(backbone.children())[:-2])
         self.register_buffer("imagenet_mean", torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1))
         self.register_buffer("imagenet_std", torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1))
+        self.pool = SpatialSoftmax2D()
         self.proj = nn.Sequential(
-            nn.Linear(512, out_dim),
+            nn.Linear(1024, out_dim),
             nn.SiLU(),
         )
 
     def forward(self, image: torch.Tensor) -> torch.Tensor:
         image = (image - self.imagenet_mean) / self.imagenet_std
-        feat = self.backbone(image)
-        return self.proj(feat)
+        feature_map = self.backbone(image)
+        pooled = self.pool(feature_map)
+        return self.proj(pooled)
 
 
 _EquiResBlockBase = escnn_nn.EquivariantModule if escnn_nn is not None else nn.Module
