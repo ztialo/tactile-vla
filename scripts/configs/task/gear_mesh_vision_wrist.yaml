@@ -1,6 +1,8 @@
 name: gear_mesh_vision_wrist
 
-shape_meta:
+dataset_path: logs/vision_rollouts/gear_mesh_500expert_demos_5dg.hdf5
+
+shape_meta: &shape_meta
   obs:
     wrist:
       shape: [3, 256, 256]
@@ -11,13 +13,21 @@ shape_meta:
   action:
     shape: [6]
 
-dataset_path: logs/vision_rollouts/gear_mesh_500expert_demos_5dg.hdf5
+env_runner:
+  _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner
 
 dataset:
+  _target_: diffusion_policy.dataset.isaaclab_hdf5_image_dataset.IsaacLabHdf5ImageDataset
+  shape_meta: *shape_meta
+  dataset_path: ${task.dataset_path}
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  n_obs_steps: ${dataset_obs_steps}
   val_ratio: 0.1
-  max_train_episodes: 0
-  max_val_episodes: 0
-  state_action_normalization: limits
-  image_normalization: zero_one
+  seed: 42
+  max_train_episodes: null
+  max_val_episodes: null
   image_crop_size: 256
-  ft: false
+  use_ft: false
+  rotation_rep: raw

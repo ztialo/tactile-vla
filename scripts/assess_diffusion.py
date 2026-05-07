@@ -7,10 +7,11 @@
 from __future__ import annotations
 
 import argparse
+import dill
+import hydra
 import os
 import sys
 import time
-from types import SimpleNamespace
 
 from isaaclab.app import AppLauncher
 
@@ -20,7 +21,9 @@ import cli_args  # isort: skip
 SCRIPT_DIR = os.path.dirname(__file__)
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
-import train_equi_df as train_impl  # isort: skip
+DP_ROOT = os.path.join(os.path.dirname(SCRIPT_DIR), "third_party", "diffusion_policy")
+if DP_ROOT not in sys.path:
+    sys.path.insert(0, DP_ROOT)
 
 
 parser = argparse.ArgumentParser(description="Assess an offline diffusion policy in Isaac Lab.")
@@ -70,6 +73,7 @@ import imageio.v2 as imageio
 import numpy as np
 import torch
 
+from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg, DirectRLEnvCfg, ManagerBasedRLEnvCfg, multi_agent_to_single_agent
 from isaaclab.utils.dict import print_dict
 
@@ -197,51 +201,19 @@ def _resolve_ft_body_indices(env) -> tuple[object, int, int]:
 
 class OfflineDiffusionInferencePolicy:
     def __init__(self, checkpoint_path: str, device: torch.device):
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        config = self._resolve_config(checkpoint)
-        stats = checkpoint["stats"]
+        payload = torch.load(open(checkpoint_path, "rb"), map_location="cpu", pickle_module=dill)
+        cfg = payload["cfg"]
+        workspace_cls = hydra.utils.get_class(cfg._target_)
+        workspace: BaseWorkspace = workspace_cls(cfg, output_dir=os.path.dirname(checkpoint_path))
+        workspace.load_payload(payload, exclude_keys=None, include_keys=None)
+        model = workspace.ema_model if cfg.training.use_ema else workspace.model
 
-        self.config = config
         self.device = device
-        self.model = train_impl.EquiDiffusionPolicy(
-            state_dim=config["state_dim"],
-            action_dim=config["action_dim"],
-            n_obs_steps=config["n_obs_steps"],
-            image_embed_dim=config["image_embed_dim"],
-            obs_feature_dim=config["obs_feature_dim"],
-            vision_encoder=config["vision_encoder"],
-            diffusion_step_embed_dim=config["diffusion_step_embed_dim"],
-            down_dims=config["down_dims"],
-            kernel_size=config["kernel_size"],
-            n_groups=config["n_groups"],
-            horizon=config["horizon"],
-            n_action_steps=config["n_action_steps"],
-            num_inference_steps=config["num_inference_steps"],
-            cond_predict_scale=config.get("cond_predict_scale", True),
-            rotation_repr=config["rotation_repr"],
-        ).to(device)
-
-        state_dict = checkpoint["ema_model"] if checkpoint.get("ema_model") is not None else checkpoint["model"]
-        self.model.load_state_dict(state_dict)
+        self.model = model.to(device)
         self.model.eval()
-
-        action_center = np.asarray(stats.get("action_center", stats.get("action_mean")), dtype=np.float32)
-        action_scale = np.asarray(stats.get("action_scale", stats.get("action_std")), dtype=np.float32)
-        self.model.set_normalizer(action_center, action_scale)
-
-        self.state_center = torch.tensor(stats.get("state_center", stats.get("state_mean")), dtype=torch.float32, device=device)
-        self.state_scale = torch.tensor(stats.get("state_scale", stats.get("state_std")), dtype=torch.float32, device=device)
-        self.image_normalization = config.get("image_normalization", "minus_one_one")
-        self.image_crop_size = config.get("image_crop_size")
-        self.use_ft = bool(config.get("ft", False)) or args_cli.ft
-        self.scheduler = train_impl._build_diffusion_scheduler(
-            SimpleNamespace(
-                scheduler_type=config.get("scheduler_type", "ddim"),
-                num_diffusion_steps=config["num_diffusion_steps"],
-                prediction_type=config["prediction_type"],
-            )
-        )
-        self.n_obs_steps = config["n_obs_steps"]
+        self.image_crop_size = cfg.task.dataset.get("image_crop_size")
+        self.use_ft = bool(cfg.task.dataset.get("use_ft", False)) or args_cli.ft
+        self.n_obs_steps = int(cfg.n_obs_steps)
         self._wrist_history = None
         self._state_history = None
         self._action_plan = None
@@ -249,42 +221,6 @@ class OfflineDiffusionInferencePolicy:
         self._robot = None
         self._left_ft_body_idx = None
         self._right_ft_body_idx = None
-
-    @staticmethod
-    def _resolve_config(checkpoint: dict) -> dict:
-        """Normalize old flat configs and new workspace configs into one flat dict."""
-        config = checkpoint["config"]
-        if "state_dim" in config and "action_dim" in config:
-            return config
-
-        if "policy" not in config:
-            raise KeyError("Checkpoint config is missing both flat model keys and a 'policy' section.")
-
-        stats = checkpoint["stats"]
-        resolved = {
-            "state_dim": len(stats.get("state_center", stats.get("state_mean"))),
-            "action_dim": len(stats.get("action_center", stats.get("action_std"))),
-            "n_obs_steps": config["n_obs_steps"],
-            "horizon": config["horizon"],
-            "n_action_steps": config["n_action_steps"],
-            "image_embed_dim": config["policy"]["image_embed_dim"],
-            "obs_feature_dim": config["policy"]["obs_feature_dim"],
-            "vision_encoder": config["policy"]["vision_encoder"],
-            "diffusion_step_embed_dim": config["policy"]["diffusion_step_embed_dim"],
-            "down_dims": config["policy"]["down_dims"],
-            "kernel_size": config["policy"]["kernel_size"],
-            "n_groups": config["policy"]["n_groups"],
-            "num_inference_steps": config["policy"]["num_inference_steps"],
-            "cond_predict_scale": config["policy"].get("cond_predict_scale", True),
-            "rotation_repr": config["policy"]["rotation_repr"],
-            "scheduler_type": config["policy"].get("scheduler_type", "ddpm"),
-            "num_diffusion_steps": config["policy"]["num_diffusion_steps"],
-            "prediction_type": config["policy"]["prediction_type"],
-            "image_normalization": config["task"]["dataset"]["image_normalization"],
-            "image_crop_size": config["task"]["dataset"].get("image_crop_size"),
-            "ft": config["task"]["dataset"].get("ft", False),
-        }
-        return resolved
 
     def reset(self):
         self._wrist_history = None
@@ -294,16 +230,7 @@ class OfflineDiffusionInferencePolicy:
 
     def _normalize_images(self, wrist_rgb: torch.Tensor) -> torch.Tensor:
         wrist_rgb = _center_crop_torch(wrist_rgb, self.image_crop_size)
-        wrist = wrist_rgb.float() / 255.0
-        if self.image_normalization == "minus_one_one":
-            wrist = wrist * 2.0 - 1.0
-        elif self.image_normalization == "zero_one":
-            pass
-        elif self.image_normalization == "imagenet":
-            pass
-        else:
-            raise ValueError(f"Unsupported image_normalization: {self.image_normalization}")
-        return wrist
+        return wrist_rgb.float() / 255.0
 
     def _maybe_init_ft(self, env):
         if not self.use_ft or self._robot is not None:
@@ -321,9 +248,7 @@ class OfflineDiffusionInferencePolicy:
             left_ft_wrench = self._robot.data.body_incoming_joint_wrench_b[:, self._left_ft_body_idx]
             right_ft_wrench = self._robot.data.body_incoming_joint_wrench_b[:, self._right_ft_body_idx]
             state_parts.extend((left_ft_wrench, right_ft_wrench))
-        state = torch.cat(state_parts, dim=-1)
-        state = (state - self.state_center) / self.state_scale
-        return wrist, state
+        return wrist, torch.cat(state_parts, dim=-1)
 
     @torch.inference_mode()
     def act(self, env) -> torch.Tensor:
@@ -338,7 +263,7 @@ class OfflineDiffusionInferencePolicy:
             self._state_history[:, -1] = state
 
         if self._action_plan is None or self._action_step >= self._action_plan.shape[1]:
-            result = self.model.predict_action({"wrist": self._wrist_history, "state": self._state_history}, self.scheduler)
+            result = self.model.predict_action({"wrist": self._wrist_history, "state": self._state_history})
             self._action_plan = result["action"]
             self._action_step = 0
 
