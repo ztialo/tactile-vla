@@ -199,6 +199,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.task.hand_init_tilt_noise_deg = args_cli.random_orn
     if args_cli.privileged_actor:
         agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
+    if hasattr(env_cfg, "action_slowdown_curriculum") and getattr(env_cfg.action_slowdown_curriculum, "enabled", False):
+        env_cfg.action_slowdown_curriculum.total_steps = agent_cfg.max_iterations * agent_cfg.num_steps_per_env
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here

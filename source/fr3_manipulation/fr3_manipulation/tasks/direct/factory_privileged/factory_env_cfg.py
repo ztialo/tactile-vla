@@ -80,6 +80,14 @@ class SlowCtrlCfg(CtrlCfg):
 
 
 @configclass
+class ActionSlowdownCurriculumCfg:
+    enabled: bool = False
+    start_scale: float = 1.0
+    end_scale: float = 1.0
+    total_steps: int = 0
+
+
+@configclass
 class FactoryEnvCfg(DirectRLEnvCfg):
     decimation = 8
     action_space = 6
@@ -106,6 +114,7 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     task: FactoryTask = FactoryTask()
     obs_rand: ObsRandCfg = ObsRandCfg()
     ctrl: CtrlCfg = CtrlCfg()
+    action_slowdown_curriculum: ActionSlowdownCurriculumCfg = ActionSlowdownCurriculumCfg()
 
     episode_length_s = 10.0  # Probably need to override.
     sim: SimulationCfg = SimulationCfg(
@@ -153,7 +162,10 @@ class FactoryTaskGearMeshCfg(FactoryEnvCfg):
 class FactoryTaskGearMeshSlowCfg(FactoryEnvCfg):
     task_name = "gear_mesh"
     task = GearMesh()
-    ctrl: SlowCtrlCfg = SlowCtrlCfg()
+    ctrl: CtrlCfg = CtrlCfg()
+    action_slowdown_curriculum: ActionSlowdownCurriculumCfg = ActionSlowdownCurriculumCfg(
+        enabled=True, start_scale=1.0, end_scale=0.4, total_steps=0
+    )
     episode_length_s = 20.0
 
 

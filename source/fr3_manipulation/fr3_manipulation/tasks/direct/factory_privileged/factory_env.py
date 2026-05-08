@@ -43,17 +43,47 @@ class FactoryEnv(DirectRLEnv):
             (self.num_envs, 1)
         )
 
-        self.pos_threshold = torch.tensor(self.cfg.ctrl.pos_action_threshold, device=self.device).repeat(
+        self._base_pos_threshold = torch.tensor(self.cfg.ctrl.pos_action_threshold, device=self.device).repeat(
             (self.num_envs, 1)
         )
-        self.rot_threshold = torch.tensor(self.cfg.ctrl.rot_action_threshold, device=self.device).repeat(
+        self._base_rot_threshold = torch.tensor(self.cfg.ctrl.rot_action_threshold, device=self.device).repeat(
             (self.num_envs, 1)
         )
+        self._base_pos_action_bounds = torch.tensor(self.cfg.ctrl.pos_action_bounds, device=self.device)
+        self._base_rot_action_bounds = torch.tensor(self.cfg.ctrl.rot_action_bounds, device=self.device)
+        self.pos_threshold = self._base_pos_threshold.clone()
+        self.rot_threshold = self._base_rot_threshold.clone()
+        self.pos_action_bounds = self._base_pos_action_bounds.clone()
+        self.rot_action_bounds = self._base_rot_action_bounds.clone()
+        self.current_action_scale = 1.0
+        self._update_action_slowdown_curriculum(force=True)
 
         # Set masses and frictions.
         factory_utils.set_friction(self._held_asset, self.cfg_task.held_asset_cfg.friction, self.scene.num_envs)
         factory_utils.set_friction(self._fixed_asset, self.cfg_task.fixed_asset_cfg.friction, self.scene.num_envs)
         factory_utils.set_friction(self._robot, self.cfg_task.robot_cfg.friction, self.scene.num_envs)
+
+    def _update_action_slowdown_curriculum(self, force: bool = False):
+        curriculum_cfg = self.cfg.action_slowdown_curriculum
+        if not curriculum_cfg.enabled:
+            self.current_action_scale = 1.0
+            self.pos_threshold[:] = self._base_pos_threshold
+            self.rot_threshold[:] = self._base_rot_threshold
+            self.pos_action_bounds[:] = self._base_pos_action_bounds
+            self.rot_action_bounds[:] = self._base_rot_action_bounds
+            return
+
+        total_steps = max(int(curriculum_cfg.total_steps), 1)
+        progress = min(max(float(self.common_step_counter) / float(total_steps), 0.0), 1.0)
+        current_scale = curriculum_cfg.start_scale + progress * (curriculum_cfg.end_scale - curriculum_cfg.start_scale)
+        if (not force) and abs(current_scale - self.current_action_scale) < 1.0e-8:
+            return
+
+        self.current_action_scale = current_scale
+        self.pos_threshold[:] = self._base_pos_threshold * current_scale
+        self.rot_threshold[:] = self._base_rot_threshold * current_scale
+        self.pos_action_bounds[:] = self._base_pos_action_bounds * current_scale
+        self.rot_action_bounds[:] = self._base_rot_action_bounds * current_scale
 
     def _init_tensors(self):
         """Initialize tensors once."""
@@ -265,6 +295,7 @@ class FactoryEnv(DirectRLEnv):
 
     def _apply_action(self):
         """Apply actions for policy as delta targets from current position."""
+        self._update_action_slowdown_curriculum()
         # Note: We use finite-differenced velocities for control and observations.
         # Check if we need to re-compute velocities within the decimation loop.
         if self.last_update_timestamp < self._robot._data._sim_timestamp:
@@ -284,7 +315,7 @@ class FactoryEnv(DirectRLEnv):
         fixed_pos_action_frame = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
         delta_pos = ctrl_target_fingertip_midpoint_pos - fixed_pos_action_frame
         pos_error_clipped = torch.clip(
-            delta_pos, -self.cfg.ctrl.pos_action_bounds[0], self.cfg.ctrl.pos_action_bounds[1]
+            delta_pos, -self.pos_action_bounds[0], self.pos_action_bounds[1]
         )
         ctrl_target_fingertip_midpoint_pos = fixed_pos_action_frame + pos_error_clipped
 
@@ -424,6 +455,7 @@ class FactoryEnv(DirectRLEnv):
             success_times = self.ep_success_times[nonzero_success_ids].sum() / len(nonzero_success_ids)
             self.extras["success_times"] = success_times
 
+        self.extras["action_scale"] = self.current_action_scale
         for rew_name, rew in rew_dict.items():
             self.extras[f"logs_rew_{rew_name}"] = rew.mean()
 
