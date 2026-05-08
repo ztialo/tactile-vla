@@ -14,7 +14,17 @@ shape_meta: &shape_meta
     shape: [6]
 
 env_runner:
-  _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner
+  _target_: diffusion_policy.env_runner.isaaclab_diffusion_image_runner.IsaacLabDiffusionImageRunner
+  task_name: Visuomotor-Factory-GearMesh-Direct-v0
+  num_envs: 8
+  num_loops: 1
+  device: ${training.device}
+  use_fabric: true
+  headless: true
+  real_time: false
+  random_orn: null
+  image_crop_size: ${..dataset.image_crop_size}
+  use_ft: ${..dataset.use_ft}
 
 dataset:
   _target_: diffusion_policy.dataset.isaaclab_hdf5_image_dataset.IsaacLabHdf5ImageDataset
