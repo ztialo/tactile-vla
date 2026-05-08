@@ -192,6 +192,28 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import fr3_manipulation.tasks  # noqa: F401
 
 
+def _get_checkpoint_actor_input_dim(checkpoint_path: str) -> int | None:
+    """Read the actor input dimension from an RSL-RL checkpoint."""
+    try:
+        payload = torch.load(checkpoint_path, map_location="cpu")
+    except Exception as exc:
+        print(f"[WARN] Failed to inspect checkpoint actor input dim from {checkpoint_path}: {exc}")
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    model_state_dict = payload.get("model_state_dict")
+    if not isinstance(model_state_dict, dict):
+        return None
+
+    actor_weight = model_state_dict.get("actor.0.weight")
+    if actor_weight is None or getattr(actor_weight, "ndim", None) != 2:
+        return None
+
+    return int(actor_weight.shape[1])
+
+
 def _parse_env_ids(spec: str, num_envs: int, device: torch.device) -> torch.Tensor:
     """Parse a comma-separated env id list or 'all'."""
     if spec.lower() == "all":
@@ -312,6 +334,32 @@ def _compute_teacher_policy_obs(base_env) -> torch.Tensor:
     )
 
 
+def _configure_teacher_policy_obs(task_name: str, checkpoint_path: str, base_env, teacher_agent_cfg) -> None:
+    """Configure teacher actor observations, including legacy 51-dim checkpoint compatibility."""
+    if "Visuomotor-" not in task_name:
+        teacher_agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
+        return
+
+    actor_input_dim = _get_checkpoint_actor_input_dim(checkpoint_path)
+    if actor_input_dim == 51:
+        teacher_agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
+        print(
+            "[INFO] Detected legacy teacher checkpoint with 51-dim actor input; "
+            "using critic observations for policy loading compatibility."
+        )
+        return
+
+    teacher_agent_cfg.obs_groups = {"policy": ["teacher_policy"], "critic": ["critic"]}
+    original_get_observations = base_env._get_observations
+
+    def _patched_get_observations():
+        obs_dict = original_get_observations()
+        obs_dict["teacher_policy"] = _compute_teacher_policy_obs(base_env)
+        return obs_dict
+
+    base_env._get_observations = _patched_get_observations
+
+
 def _apply_factory_init_overrides(env_cfg):
     task_cfg = getattr(env_cfg, "task", None)
     if task_cfg is None:
@@ -404,31 +452,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if args_cli.privileged_actor:
             teacher_agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
         else:
-            teacher_agent_cfg.obs_groups = {"policy": ["teacher_policy"], "critic": ["critic"]}
-
-            original_get_observations = base_env._get_observations
-
-            def _patched_get_observations():
-                obs_dict = original_get_observations()
-                obs_dict["teacher_policy"] = _compute_teacher_policy_obs(base_env)
-                return obs_dict
-
-            base_env._get_observations = _patched_get_observations
+            _configure_teacher_policy_obs(args_cli.task, resume_path, base_env, teacher_agent_cfg)
         runner_cfg = teacher_agent_cfg
         runner_class = OnPolicyRunner
     elif args_cli.privileged_actor and "Visuomotor-" in args_cli.task:
         teacher_task = args_cli.task.replace("Visuomotor-", "Privileged-")
         teacher_agent_cfg = cli_args.parse_rsl_rl_cfg(teacher_task, args_cli)
-        teacher_agent_cfg.obs_groups = {"policy": ["teacher_policy"], "critic": ["critic"]}
-
-        original_get_observations = base_env._get_observations
-
-        def _patched_get_observations():
-            obs_dict = original_get_observations()
-            obs_dict["teacher_policy"] = _compute_teacher_policy_obs(base_env)
-            return obs_dict
-
-        base_env._get_observations = _patched_get_observations
+        _configure_teacher_policy_obs(args_cli.task, resume_path, base_env, teacher_agent_cfg)
         runner_cfg = teacher_agent_cfg
         runner_class = OnPolicyRunner
     else:
