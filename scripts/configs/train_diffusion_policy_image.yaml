@@ -118,10 +118,10 @@ logging:
 
 checkpoint:
   topk:
-    monitor_key: rollout_episode_success_rate
-    mode: max
+    monitor_key: val_loss
+    mode: min
     k: 5
-    format_str: 'epoch={epoch:04d}-rollout_success={rollout_episode_success_rate:.4f}.ckpt'
+    format_str: 'epoch={epoch:04d}-val_loss={val_loss:.4f}.ckpt'
   save_last_ckpt: True
   save_last_snapshot: False
 
