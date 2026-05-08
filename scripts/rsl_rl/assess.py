@@ -42,6 +42,24 @@ parser.add_argument(
     help="Enable random EE roll/pitch initialization with +/- this many degrees for tasks that support it.",
 )
 parser.add_argument(
+    "--fixed_eef_init",
+    action="store_true",
+    default=False,
+    help="Disable random EEF position/orientation initialization noise for assessment.",
+)
+parser.add_argument(
+    "--fixed_asset_yaw_deg",
+    type=float,
+    default=None,
+    help="Override the fixed asset nominal yaw in degrees.",
+)
+parser.add_argument(
+    "--fixed_asset_yaw_range_deg",
+    type=float,
+    default=None,
+    help="Override the fixed asset yaw randomization range in degrees. Use 0 for fixed yaw.",
+)
+parser.add_argument(
     "--privileged_actor",
     action="store_true",
     default=False,
@@ -124,6 +142,27 @@ def _to_float(value):
     return float(value)
 
 
+def _apply_factory_init_overrides(env_cfg):
+    task_cfg = getattr(env_cfg, "task", None)
+    if task_cfg is None:
+        return
+
+    if args_cli.fixed_eef_init:
+        task_cfg.hand_init_pos_noise = [0.0, 0.0, 0.0]
+        task_cfg.hand_init_orn_noise = [0.0, 0.0, 0.0]
+        if hasattr(task_cfg, "randomize_hand_init_tilt"):
+            task_cfg.randomize_hand_init_tilt = False
+        print("[INFO] Fixed EEF init enabled: zeroed hand init position/orientation noise.")
+
+    if args_cli.fixed_asset_yaw_deg is not None:
+        task_cfg.fixed_asset_init_orn_deg = float(args_cli.fixed_asset_yaw_deg)
+        print(f"[INFO] Fixed asset nominal yaw set to {task_cfg.fixed_asset_init_orn_deg:.2f} deg.")
+
+    if args_cli.fixed_asset_yaw_range_deg is not None:
+        task_cfg.fixed_asset_init_orn_range_deg = float(args_cli.fixed_asset_yaw_range_deg)
+        print(f"[INFO] Fixed asset yaw range set to {task_cfg.fixed_asset_init_orn_range_deg:.2f} deg.")
+
+
 def _get_current_success_rate(env):
     """Compute the current Factory success rate from the raw environment state."""
     if not hasattr(env, "_get_curr_successes"):
@@ -168,6 +207,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.random_orn is not None and hasattr(env_cfg, "task") and hasattr(env_cfg.task, "randomize_hand_init_tilt"):
         env_cfg.task.randomize_hand_init_tilt = True
         env_cfg.task.hand_init_tilt_noise_deg = args_cli.random_orn
+    _apply_factory_init_overrides(env_cfg)
     if args_cli.privileged_actor:
         agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
 
