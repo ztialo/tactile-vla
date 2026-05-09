@@ -85,6 +85,7 @@ class ActionSlowdownCurriculumCfg:
     start_scale: float = 1.0
     end_scale: float = 1.0
     total_steps: int = 0
+    trigger_success_rate: float = 0.0
 
 
 @configclass

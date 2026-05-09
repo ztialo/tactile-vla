@@ -71,6 +71,12 @@ parser.add_argument(
     help="Override the fixed asset yaw randomization range in degrees. Use 0 for fixed yaw.",
 )
 parser.add_argument(
+    "--fixed_asset_height",
+    action="store_true",
+    default=False,
+    help="Disable fixed-asset Z-position randomization while keeping XY position randomization unchanged.",
+)
+parser.add_argument(
     "--ft",
     action="store_true",
     default=False,
@@ -151,6 +157,14 @@ def _apply_factory_init_overrides(env_cfg):
     if args_cli.fixed_asset_yaw_range_deg is not None:
         task_cfg.fixed_asset_init_orn_range_deg = float(args_cli.fixed_asset_yaw_range_deg)
         print(f"[INFO] Fixed asset yaw range set to {task_cfg.fixed_asset_init_orn_range_deg:.2f} deg.")
+
+    if args_cli.fixed_asset_height and hasattr(task_cfg, "fixed_asset_init_pos_noise"):
+        pos_noise = list(task_cfg.fixed_asset_init_pos_noise)
+        if len(pos_noise) < 3:
+            raise ValueError("task.fixed_asset_init_pos_noise must have at least 3 elements [x, y, z].")
+        pos_noise[2] = 0.0
+        task_cfg.fixed_asset_init_pos_noise = pos_noise
+        print("[INFO] Fixed asset height enabled: zeroed fixed-asset Z-position randomization noise.")
 
 
 def _to_uint8_rgb(frame: torch.Tensor):

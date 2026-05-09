@@ -56,6 +56,8 @@ class FactoryEnv(DirectRLEnv):
         self.pos_action_bounds = self._base_pos_action_bounds.clone()
         self.rot_action_bounds = self._base_rot_action_bounds.clone()
         self.current_action_scale = 1.0
+        self.curriculum_success_rate = 0.0
+        self.curriculum_trigger_step = None
         self._update_action_slowdown_curriculum(force=True)
 
         # Set masses and frictions.
@@ -74,7 +76,19 @@ class FactoryEnv(DirectRLEnv):
             return
 
         total_steps = max(int(curriculum_cfg.total_steps), 1)
-        progress = min(max(float(self.common_step_counter) / float(total_steps), 0.0), 1.0)
+        if curriculum_cfg.trigger_success_rate > 0.0:
+            if self.curriculum_success_rate < float(curriculum_cfg.trigger_success_rate):
+                progress = 0.0
+            else:
+                if self.curriculum_trigger_step is None:
+                    self.curriculum_trigger_step = int(self.common_step_counter)
+                remaining_steps = max(total_steps - self.curriculum_trigger_step, 1)
+                progress = min(
+                    max(float(self.common_step_counter - self.curriculum_trigger_step) / float(remaining_steps), 0.0),
+                    1.0,
+                )
+        else:
+            progress = min(max(float(self.common_step_counter) / float(total_steps), 0.0), 1.0)
         current_scale = curriculum_cfg.start_scale + progress * (curriculum_cfg.end_scale - curriculum_cfg.start_scale)
         if (not force) and abs(current_scale - self.current_action_scale) < 1.0e-8:
             return
@@ -441,7 +455,17 @@ class FactoryEnv(DirectRLEnv):
         """Keep track of episode statistics and log rewards."""
         # Only log episode success rates at the end of an episode.
         if torch.any(self.reset_buf):
-            self.extras["successes"] = torch.count_nonzero(curr_successes) / self.num_envs
+            success_rate = torch.count_nonzero(curr_successes) / self.num_envs
+            self.extras["successes"] = success_rate
+            self.curriculum_success_rate = float(success_rate.item())
+            if (
+                self.cfg.action_slowdown_curriculum.enabled
+                and self.cfg.action_slowdown_curriculum.trigger_success_rate > 0.0
+                and self.curriculum_trigger_step is None
+                and self.curriculum_success_rate >= float(self.cfg.action_slowdown_curriculum.trigger_success_rate)
+            ):
+                self.curriculum_trigger_step = int(self.common_step_counter)
+                self._update_action_slowdown_curriculum(force=True)
 
         # Get the time at which an episode first succeeds.
         first_success = torch.logical_and(curr_successes, torch.logical_not(self.ep_succeeded))
@@ -456,6 +480,7 @@ class FactoryEnv(DirectRLEnv):
             self.extras["success_times"] = success_times
 
         self.extras["action_scale"] = self.current_action_scale
+        self.extras["curriculum_success_rate"] = self.curriculum_success_rate
         for rew_name, rew in rew_dict.items():
             self.extras[f"logs_rew_{rew_name}"] = rew.mean()
 

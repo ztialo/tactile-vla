@@ -54,4 +54,4 @@ class FactoryPrivilegedPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 @configclass
 class FactoryPrivilegedSlowPPORunnerCfg(FactoryPrivilegedPPORunnerCfg):
     experiment_name = "factory_privileged_slow"
-    run_name = "teacher_0p4x"
+    run_name = "teacher_0p2x"
