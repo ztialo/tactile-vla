@@ -43,7 +43,7 @@ parser.add_argument(
     default=1,
     help="Number of episode-length loops to run before stopping. Use <= 0 to run until closed.",
 )
-parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
+parser.add_argument("--num_envs", type=int, default=16, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment.")
 parser.add_argument(
@@ -57,6 +57,12 @@ parser.add_argument(
     action="store_true",
     default=False,
     help="Disable random EEF position/orientation initialization noise for assessment.",
+)
+parser.add_argument(
+    "--eef_init_z",
+    type=float,
+    default=None,
+    help="Override the nominal EEF start height offset in meters relative to the fixed asset tip.",
 )
 parser.add_argument(
     "--fixed_asset_yaw_deg",
@@ -81,6 +87,12 @@ parser.add_argument(
     action="store_true",
     default=False,
     help="Append left/right 6D FT wrench readings to the low-dimensional state during inference.",
+)
+parser.add_argument(
+    "--pre_action_wait_seconds",
+    type=float,
+    default=0.0,
+    help="Hold the robot still for this many seconds at the start of each episode before running the diffusion policy.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 AppLauncher.add_app_launcher_args(parser)
@@ -113,7 +125,7 @@ def _set_default_factory_video_view(env_cfg, task_name: str | None):
     if not hasattr(env_cfg, "viewer") or env_cfg.viewer is None:
         return
     if hasattr(env_cfg.viewer, "eye"):
-        env_cfg.viewer.eye = (1.4, -0.015, 0.28)
+        env_cfg.viewer.eye = (1.8, -0.03, 0.34)
     if hasattr(env_cfg.viewer, "lookat"):
         env_cfg.viewer.lookat = (0.60, 0.00, 0.12)
 
@@ -142,6 +154,14 @@ def _apply_factory_init_overrides(env_cfg):
     task_cfg = getattr(env_cfg, "task", None)
     if task_cfg is None:
         return
+
+    if args_cli.eef_init_z is not None:
+        hand_init_pos = list(task_cfg.hand_init_pos)
+        if len(hand_init_pos) < 3:
+            raise ValueError("task.hand_init_pos must have at least 3 elements [x, y, z].")
+        hand_init_pos[2] = float(args_cli.eef_init_z)
+        task_cfg.hand_init_pos = hand_init_pos
+        print(f"[INFO] EEF nominal start height offset set to {task_cfg.hand_init_pos[2]:.4f} m.")
 
     if args_cli.fixed_eef_init:
         task_cfg.hand_init_pos_noise = [0.0, 0.0, 0.0]
@@ -407,11 +427,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     timestep = 0
     completed_loops = 0
     loop_success_rates = []
+    pre_action_wait_steps = max(int(round(args_cli.pre_action_wait_seconds / base_env.step_dt)), 0)
+    timestep_in_episode = 0
 
     while simulation_app.is_running():
         start_time = time.time()
         with torch.inference_mode():
-            actions = policy.act(base_env)
+            if timestep_in_episode < pre_action_wait_steps:
+                actions = torch.zeros_like(base_env.actions)
+            else:
+                actions = policy.act(base_env)
             _, _, terminated, truncated, extras = env.step(actions)
             dones = torch.logical_or(terminated, truncated)
             if zed_writer is not None:
@@ -443,10 +468,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 if episode_success_rate is not None:
                     loop_success_rates.append(episode_success_rate)
                 policy.reset()
+                timestep_in_episode = 0
                 if args_cli.num_loops > 0 and completed_loops >= args_cli.num_loops:
                     break
 
         timestep += 1
+        timestep_in_episode += 1
         if max_assessment_steps is not None and timestep >= max_assessment_steps:
             break
 
