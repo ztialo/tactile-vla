@@ -466,6 +466,13 @@ class FactoryEnv(DirectRLEnv):
             ):
                 self.curriculum_trigger_step = int(self.common_step_counter)
                 self._update_action_slowdown_curriculum(force=True)
+                print(
+                    "[INFO] Action slowdown curriculum triggered: "
+                    f"step={self.curriculum_trigger_step}, "
+                    f"success_rate={self.curriculum_success_rate:.4f}, "
+                    f"start_scale={self.cfg.action_slowdown_curriculum.start_scale:.3f}, "
+                    f"end_scale={self.cfg.action_slowdown_curriculum.end_scale:.3f}"
+                )
 
         # Get the time at which an episode first succeeds.
         first_success = torch.logical_and(curr_successes, torch.logical_not(self.ep_succeeded))

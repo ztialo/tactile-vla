@@ -119,6 +119,12 @@ parser.add_argument(
     help="Multiply only the Z-axis action (dz) by this factor before stepping the env.",
 )
 parser.add_argument(
+    "--action_scale_xyz",
+    type=float,
+    default=1.0,
+    help="Multiply only the translational action components (dx, dy, dz) by this factor before stepping the env.",
+)
+parser.add_argument(
     "--action_smoothing_alpha",
     type=float,
     default=1.0,
@@ -535,6 +541,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         raise ValueError("--action_smoothing_alpha must be in [0, 1].")
     if args_cli.action_scale <= 0.0:
         raise ValueError("--action_scale must be > 0.")
+    if args_cli.action_scale_xyz <= 0.0:
+        raise ValueError("--action_scale_xyz must be > 0.")
     last_actions = None
     if args_cli.log_path:
         os.makedirs(os.path.dirname(os.path.abspath(args_cli.log_path)), exist_ok=True)
@@ -564,6 +572,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         h5_file.attrs["pre_action_wait_seconds"] = args_cli.pre_action_wait_seconds
         h5_file.attrs["wrist_rgb_crop"] = "centerbottom_256x256"
         h5_file.attrs["action_scale"] = args_cli.action_scale
+        h5_file.attrs["action_scale_xyz"] = args_cli.action_scale_xyz
         h5_file.attrs["action_scale_z"] = args_cli.action_scale_z
         print(f"[INFO] Vision rollout HDF5 log: {os.path.abspath(args_cli.log_path)}")
         print(f"[INFO] Logging env ids: {h5_file.attrs['logged_env_ids'].tolist()}")
@@ -582,8 +591,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     prev_ep_succeeded = base_env.ep_succeeded.clone().to(dtype=torch.bool)
                 # agent stepping
                 raw_actions = policy(obs) * args_cli.action_scale
-                if args_cli.action_scale_z != 1.0:
+                if args_cli.action_scale_xyz != 1.0 or args_cli.action_scale_z != 1.0:
                     raw_actions = raw_actions.clone()
+                    raw_actions[:, 0:3] *= args_cli.action_scale_xyz
                     raw_actions[:, 2] *= args_cli.action_scale_z
                 hold_mask = None
                 if h5_file is not None:
