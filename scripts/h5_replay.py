@@ -41,6 +41,24 @@ def _parse_args() -> argparse.Namespace:
         help="Optional center-crop size applied to wrist RGB before writing the MP4.",
     )
     parser.add_argument(
+        "--square_wrist",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Center-crop wrist frames to a square using min(height, width). Applied before --img_size.",
+    )
+    parser.add_argument(
+        "--sync_height",
+        type=int,
+        default=720,
+        help="Optional output height for the side-by-side sync video. Upscales/downscales both panels.",
+    )
+    parser.add_argument(
+        "--ft_ma_window",
+        type=int,
+        default=9,
+        help="Moving-average window for FT wrench overlay. 1 disables smoothing.",
+    )
+    parser.add_argument(
         "--output_root",
         type=str,
         default="logs/demo_replay",
@@ -86,6 +104,15 @@ def _center_crop_numpy(images: np.ndarray, crop_size: int | None) -> np.ndarray:
     return images[:, top : top + crop_size, left : left + crop_size, :]
 
 
+def _center_square_numpy(images: np.ndarray) -> np.ndarray:
+    """Center crop NHWC image batches to square using min(height, width)."""
+    height, width = images.shape[1:3]
+    crop_size = min(height, width)
+    top = (height - crop_size) // 2
+    left = (width - crop_size) // 2
+    return images[:, top : top + crop_size, left : left + crop_size, :]
+
+
 def _default_fps_from_h5(h5_file: h5py.File) -> int:
     """Infer playback FPS from H5 metadata, with a conservative fallback."""
     for key in ("fps", "playback_fps", "env_fps"):
@@ -94,6 +121,139 @@ def _default_fps_from_h5(h5_file: h5py.File) -> int:
             if value > 0:
                 return value
     return 15
+
+
+def _resize_image_nearest(image: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+    """Resize an HWC uint8 image with nearest-neighbor sampling."""
+    if target_h <= 0 or target_w <= 0:
+        raise ValueError(f"Invalid resize target: {(target_h, target_w)}")
+    src_h, src_w = image.shape[:2]
+    if src_h == target_h and src_w == target_w:
+        return image
+    y_idx = np.linspace(0, src_h - 1, target_h).astype(np.int64)
+    x_idx = np.linspace(0, src_w - 1, target_w).astype(np.int64)
+    return image[y_idx][:, x_idx]
+
+
+def _resize_to_height(image: np.ndarray, target_h: int) -> np.ndarray:
+    """Resize image to target height preserving aspect ratio."""
+    if target_h <= 0:
+        raise ValueError(f"sync_height must be positive, got {target_h}")
+    src_h, src_w = image.shape[:2]
+    target_w = max(int(round(src_w * target_h / src_h)), 1)
+    return _resize_image_nearest(image, target_h, target_w)
+
+
+def _moving_average_ft(values: np.ndarray, window: int) -> np.ndarray:
+    """Apply edge-padded moving-average filter to [T, 6] FT wrench values."""
+    if window <= 1:
+        return values.copy()
+    if window < 0:
+        raise ValueError(f"ft_ma_window must be >= 1, got {window}")
+    kernel = np.ones(window, dtype=np.float32) / float(window)
+    pad_left = window // 2
+    pad_right = window - 1 - pad_left
+    padded = np.pad(values, ((pad_left, pad_right), (0, 0)), mode="edge")
+    filtered = np.empty_like(values, dtype=np.float32)
+    for axis_idx in range(values.shape[1]):
+        filtered[:, axis_idx] = np.convolve(padded[:, axis_idx], kernel, mode="valid")
+    return filtered
+
+
+def _figure_to_rgb(fig: plt.Figure) -> np.ndarray:
+    """Render a Matplotlib figure to an HWC RGB uint8 image."""
+    fig.canvas.draw()
+    rgba = np.asarray(fig.canvas.buffer_rgba(), dtype=np.uint8)
+    return rgba[..., :3].copy()
+
+
+def _pad_to_even_hw(image: np.ndarray) -> np.ndarray:
+    """Pad an HWC RGB image to even height/width for yuv420p encoders (e.g., libx264)."""
+    height, width = image.shape[:2]
+    pad_h = height % 2
+    pad_w = width % 2
+    if pad_h == 0 and pad_w == 0:
+        return image
+    out = np.zeros((height + pad_h, width + pad_w, image.shape[2]), dtype=image.dtype)
+    out[:height, :width] = image
+    if pad_w:
+        out[:height, width:] = image[:height, width - 1 : width]
+    if pad_h:
+        out[height:, :width] = image[height - 1 : height, :width]
+    if pad_h and pad_w:
+        out[height:, width:] = image[height - 1 : height, width - 1 : width]
+    return out
+
+
+def _make_ft_plot_renderer(
+    left_ft: np.ndarray,
+    right_ft: np.ndarray,
+    left_ft_filtered: np.ndarray,
+    right_ft_filtered: np.ndarray,
+    axis_names: list[str],
+    title: str,
+) -> tuple[callable, callable]:
+    """Create a renderer that returns an FT plot frame for each timestep."""
+    num_steps = left_ft.shape[0]
+    x = np.arange(num_steps, dtype=np.int64)
+    fig, axes = plt.subplots(3, 2, figsize=(10, 8), sharex=True)
+    fig.suptitle(title, fontsize=12)
+
+    line_specs: list[tuple[object, object, object, object, int]] = []
+    cursors: list[object] = []
+    for row in range(3):
+        force_idx = row
+        torque_idx = row + 3
+        for col, axis_idx, prefix in ((0, force_idx, "Force"), (1, torque_idx, "Torque")):
+            ax = axes[row, col]
+            left_raw_line, = ax.plot([], [], color="tab:blue", linewidth=1.3, alpha=0.45, label="left raw")
+            right_raw_line, = ax.plot([], [], color="tab:orange", linewidth=1.3, alpha=0.45, label="right raw")
+            left_filt_line, = ax.plot([], [], color="tab:blue", linewidth=1.8, linestyle="--", label="left filtered")
+            right_filt_line, = ax.plot(
+                [], [], color="tab:orange", linewidth=1.8, linestyle="--", label="right filtered"
+            )
+            combined = np.concatenate(
+                (
+                    left_ft[:, axis_idx],
+                    right_ft[:, axis_idx],
+                    left_ft_filtered[:, axis_idx],
+                    right_ft_filtered[:, axis_idx],
+                ),
+                axis=0,
+            )
+            value_min = float(np.nanmin(combined))
+            value_max = float(np.nanmax(combined))
+            if np.isclose(value_min, value_max):
+                padding = 1.0 if np.isclose(value_min, 0.0) else 0.1 * abs(value_min)
+            else:
+                padding = 0.08 * (value_max - value_min)
+            ax.set_xlim(0, max(num_steps - 1, 1))
+            ax.set_ylim(value_min - padding, value_max + padding)
+            ax.set_title(f"{prefix} {axis_names[axis_idx]}")
+            ax.set_ylabel("force/torque")
+            ax.grid(alpha=0.3)
+            cursor = ax.axvline(0, color="k", linestyle="--", linewidth=0.9, alpha=0.75)
+            cursors.append(cursor)
+            line_specs.append((left_raw_line, right_raw_line, left_filt_line, right_filt_line, axis_idx))
+
+    axes[2, 0].set_xlabel("step")
+    axes[2, 1].set_xlabel("step")
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper right")
+    fig.tight_layout()
+
+    def _render(step_idx: int) -> np.ndarray:
+        end = step_idx + 1
+        for left_raw, right_raw, left_filt, right_filt, axis_idx in line_specs:
+            left_raw.set_data(x[:end], left_ft[:end, axis_idx])
+            right_raw.set_data(x[:end], right_ft[:end, axis_idx])
+            left_filt.set_data(x[:end], left_ft_filtered[:end, axis_idx])
+            right_filt.set_data(x[:end], right_ft_filtered[:end, axis_idx])
+        for cursor in cursors:
+            cursor.set_xdata([step_idx, step_idx])
+        return _figure_to_rgb(fig)
+
+    return _render, fig
 
 
 def main():
@@ -117,6 +277,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     video_path = out_dir / "replay.mp4"
     plot_path = out_dir / "ft_wrench.png"
+    sync_video_path = out_dir / "replay_ft_sync.mp4"
 
     with h5py.File(h5_path, "r") as h5_file:
         required = ["done", "wrist_rgb"]
@@ -142,6 +303,8 @@ def main():
         end = int(selected_bounds[-1][1])
 
         wrist_rgb = np.asarray(h5_file["wrist_rgb"][rows], dtype=np.uint8)
+        if args.square_wrist:
+            wrist_rgb = _center_square_numpy(wrist_rgb)
         wrist_rgb = _center_crop_numpy(wrist_rgb, args.img_size)
         fps = args.fps if args.fps is not None else _default_fps_from_h5(h5_file)
         left_ft = None
@@ -151,11 +314,13 @@ def main():
             left_ft = np.asarray(h5_file["left_ft_wrench"][rows], dtype=np.float32)
             right_ft = np.asarray(h5_file["right_ft_wrench"][rows], dtype=np.float32)
             axis_names = _get_wrench_axis_names(h5_file)
+            left_ft_filtered = _moving_average_ft(left_ft, args.ft_ma_window)
+            right_ft_filtered = _moving_average_ft(right_ft, args.ft_ma_window)
         x = np.arange(wrist_rgb.shape[0], dtype=np.int64)
 
     with imageio.get_writer(str(video_path), fps=max(fps, 1), macro_block_size=1) as writer:
         for frame in wrist_rgb:
-            writer.append_data(frame)
+            writer.append_data(_pad_to_even_hw(frame))
 
     if not args.vision:
         fig, axes = plt.subplots(3, 2, figsize=(12, 10), sharex=True)
@@ -164,15 +329,49 @@ def main():
             torque_idx = row + 3
 
             ax_force = axes[row, 0]
-            ax_force.plot(x, left_ft[:, force_idx], color="tab:blue", linewidth=1.6, label="left")
-            ax_force.plot(x, right_ft[:, force_idx], color="tab:orange", linewidth=1.6, label="right")
+            ax_force.plot(x, left_ft[:, force_idx], color="tab:blue", linewidth=1.3, alpha=0.45, label="left raw")
+            ax_force.plot(
+                x,
+                left_ft_filtered[:, force_idx],
+                color="tab:blue",
+                linewidth=1.8,
+                linestyle="--",
+                label="left filtered",
+            )
+            ax_force.plot(x, right_ft[:, force_idx], color="tab:orange", linewidth=1.3, alpha=0.45, label="right raw")
+            ax_force.plot(
+                x,
+                right_ft_filtered[:, force_idx],
+                color="tab:orange",
+                linewidth=1.8,
+                linestyle="--",
+                label="right filtered",
+            )
             ax_force.set_title(f"Force {axis_names[force_idx]}")
             ax_force.grid(alpha=0.3)
             ax_force.set_ylabel("force/torque")
 
             ax_torque = axes[row, 1]
-            ax_torque.plot(x, left_ft[:, torque_idx], color="tab:blue", linewidth=1.6, label="left")
-            ax_torque.plot(x, right_ft[:, torque_idx], color="tab:orange", linewidth=1.6, label="right")
+            ax_torque.plot(x, left_ft[:, torque_idx], color="tab:blue", linewidth=1.3, alpha=0.45, label="left raw")
+            ax_torque.plot(
+                x,
+                left_ft_filtered[:, torque_idx],
+                color="tab:blue",
+                linewidth=1.8,
+                linestyle="--",
+                label="left filtered",
+            )
+            ax_torque.plot(
+                x, right_ft[:, torque_idx], color="tab:orange", linewidth=1.3, alpha=0.45, label="right raw"
+            )
+            ax_torque.plot(
+                x,
+                right_ft_filtered[:, torque_idx],
+                color="tab:orange",
+                linewidth=1.8,
+                linestyle="--",
+                label="right filtered",
+            )
             ax_torque.set_title(f"Torque {axis_names[torque_idx]}")
             ax_torque.grid(alpha=0.3)
 
@@ -185,9 +384,42 @@ def main():
         fig.savefig(plot_path, dpi=180)
         plt.close(fig)
 
+        render_ft_frame, ft_fig = _make_ft_plot_renderer(
+            left_ft,
+            right_ft,
+            left_ft_filtered,
+            right_ft_filtered,
+            axis_names,
+            f"{h5_path.name} | demo {demo_label} | rows {start}-{end}",
+        )
+        resized_for_sync = False
+        with imageio.get_writer(str(sync_video_path), fps=max(fps, 1), macro_block_size=1) as writer:
+            for frame_idx, wrist_frame in enumerate(wrist_rgb):
+                ft_frame = render_ft_frame(frame_idx)
+                if args.sync_height is not None:
+                    wrist_frame = _resize_to_height(wrist_frame, args.sync_height)
+                    ft_frame = _resize_to_height(ft_frame, args.sync_height)
+                if ft_frame.shape[0] != wrist_frame.shape[0]:
+                    target_w = max(int(round(ft_frame.shape[1] * wrist_frame.shape[0] / ft_frame.shape[0])), 1)
+                    ft_frame = _resize_image_nearest(ft_frame, wrist_frame.shape[0], target_w)
+                    resized_for_sync = True
+                synced = np.concatenate((wrist_frame, ft_frame), axis=1)
+                writer.append_data(_pad_to_even_hw(synced))
+        plt.close(ft_fig)
+
     print(f"[INFO] Wrote video: {video_path}")
     if not args.vision:
         print(f"[INFO] Wrote plot:  {plot_path}")
+        print(f"[INFO] Wrote sync:  {sync_video_path}")
+        if args.square_wrist:
+            print("[INFO] Sync video note: wrist camera center-cropped to square.")
+        if args.sync_height is not None:
+            print(f"[INFO] Sync video note: upscaled/downscaled panels to {args.sync_height}px height.")
+        print(f"[INFO] FT moving-average window: {args.ft_ma_window}")
+        if resized_for_sync:
+            print("[INFO] Sync video note: resized FT plot panel to match wrist frame height.")
+        else:
+            print("[INFO] Sync video note: no resize needed (matched panel heights).")
     print(f"[INFO] Demo rows:  {start}..{end} ({rows.shape[0]} concatenated steps)")
     print(f"[INFO] Replay FPS:  {fps}")
 

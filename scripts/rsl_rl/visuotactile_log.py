@@ -112,6 +112,12 @@ parser.add_argument(
     default=1.0,
     help="Hold the robot still for this many seconds at the start of each episode before running the policy.",
 )
+parser.add_argument(
+    "--flush_partial_episodes_on_exit",
+    action="store_true",
+    default=False,
+    help="When stopping via max_steps/app close, flush in-progress (non-terminal) episode fragments to HDF5.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -417,6 +423,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     h5_file = None
     log_env_ids = None
     timestep_in_episode = None
+    episode_id_in_env = None
     episode_rows = None
     run_start_time = time.time()
     total_samples_written = 0
@@ -432,8 +439,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         h5_file = h5py.File(args_cli.log_path, "w")
         log_env_ids = _parse_env_ids(args_cli.log_env_ids, base_env.num_envs, base_env.device)
         timestep_in_episode = torch.zeros(base_env.num_envs, dtype=torch.int64, device=base_env.device)
+        episode_id_in_env = torch.zeros(base_env.num_envs, dtype=torch.int64, device=base_env.device)
+        episode_rows = {int(env_id): [] for env_id in log_env_ids.detach().cpu().tolist()}
         if args_cli.log_success_only:
-            episode_rows = {int(env_id): [] for env_id in log_env_ids.detach().cpu().tolist()}
             suppress_after_success = torch.zeros(base_env.num_envs, dtype=torch.bool, device=base_env.device)
             pending_success = torch.zeros(base_env.num_envs, dtype=torch.bool, device=base_env.device)
             success_tail_remaining = torch.zeros(base_env.num_envs, dtype=torch.int64, device=base_env.device)
@@ -452,6 +460,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         h5_file.attrs["left_ft_body_name"] = "fr3_left_ft"
         h5_file.attrs["right_ft_body_name"] = "fr3_right_ft"
         h5_file.attrs["ft_wrench_order"] = "fx,fy,fz,tx,ty,tz"
+        h5_file.attrs["episode_layout"] = "contiguous_per_env_episode"
         print(f"[INFO] Visuotactile rollout HDF5 log: {os.path.abspath(args_cli.log_path)}")
         print(f"[INFO] Logging env ids: {h5_file.attrs['logged_env_ids'].tolist()}")
 
@@ -501,8 +510,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     left_ft_wrench = robot.data.body_incoming_joint_wrench_b[:, left_ft_body_idx]
                     right_ft_wrench = robot.data.body_incoming_joint_wrench_b[:, right_ft_body_idx]
                     env_id_batch = _tensor_to_numpy(log_env_ids, dtype=np.int64)
-                    batch_size = env_id_batch.shape[0]
                     batch = {
+                        "env_id": env_id_batch,
+                        "episode_id": _tensor_to_numpy(episode_id_in_env, log_env_ids, dtype=np.int64),
                         "timestep": _tensor_to_numpy(timestep_in_episode, log_env_ids, dtype=np.int64),
                         "done": _tensor_to_numpy(dones_mask, log_env_ids, dtype=np.bool_),
                         "timeout": _tensor_to_numpy(timeout, log_env_ids, dtype=np.bool_),
@@ -533,9 +543,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                                 _slice_batch_rows(batch, active_mask),
                             )
                     else:
-                        _append_h5_batch(h5_file, batch)
-                        h5_file.flush()
-                        total_samples_written += batch_size
+                        _append_episode_step(episode_rows, env_id_batch, batch)
 
                     timestep_in_episode += 1
                     if args_cli.log_success_only and prev_ep_succeeded is not None:
@@ -579,8 +587,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         total_episodes_finished += int(torch.count_nonzero(dones_mask).item())
                         if last_actions is not None:
                             last_actions[dones_mask] = 0.0
+                        done_env_ids = log_env_ids[dones_mask[log_env_ids]]
                         if args_cli.log_success_only:
-                            done_env_ids = log_env_ids[dones_mask[log_env_ids]]
                             for env_id_tensor in done_env_ids:
                                 env_id = int(env_id_tensor.item())
                                 if pending_success[env_id]:
@@ -593,6 +601,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                                 success_tail_remaining[env_id] = 0
                             suppress_after_success[dones_mask] = False
                             h5_file.flush()
+                        else:
+                            for env_id_tensor in done_env_ids:
+                                env_id = int(env_id_tensor.item())
+                                total_samples_written += _flush_episode_rows(h5_file, episode_rows[env_id])
+                                episode_rows[env_id].clear()
+                            if len(done_env_ids) > 0:
+                                h5_file.flush()
+                        if len(done_env_ids) > 0:
+                            episode_id_in_env[done_env_ids] += 1
                         timestep_in_episode[dones_mask] = 0
 
             if args_cli.video:
@@ -641,6 +658,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 time.sleep(sleep_time)
     finally:
         if h5_file is not None:
+            if args_cli.flush_partial_episodes_on_exit and episode_rows is not None:
+                partial_written = 0
+                for env_id, rows in episode_rows.items():
+                    if rows:
+                        partial_written += _flush_episode_rows(h5_file, rows, force_terminal=False)
+                        rows.clear()
+                if partial_written > 0:
+                    total_samples_written += partial_written
+                    h5_file.flush()
+                    print(f"[INFO] Flushed {partial_written} rows of partial episode data on exit.")
             h5_file.close()
 
     # close the simulator
