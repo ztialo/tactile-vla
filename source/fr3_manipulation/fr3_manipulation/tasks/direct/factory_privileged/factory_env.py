@@ -95,9 +95,18 @@ class FactoryEnv(DirectRLEnv):
 
         self.current_action_scale = current_scale
         self.pos_threshold[:] = self._base_pos_threshold * current_scale
-        self.rot_threshold[:] = self._base_rot_threshold * current_scale
         self.pos_action_bounds[:] = self._base_pos_action_bounds * current_scale
-        self.rot_action_bounds[:] = self._base_rot_action_bounds * current_scale
+        if curriculum_cfg.scale_rotation:
+            # Scale rotation by a fraction of translation slowdown.
+            # rotation_scale_strength=1.0 -> identical scaling, 0.5 -> half as strong, 0.0 -> no scaling.
+            rot_strength = max(float(curriculum_cfg.rotation_scale_strength), 0.0)
+            rot_scale = 1.0 + rot_strength * (current_scale - 1.0)
+            rot_scale = max(rot_scale, 0.0)
+            self.rot_threshold[:] = self._base_rot_threshold * rot_scale
+            self.rot_action_bounds[:] = self._base_rot_action_bounds * rot_scale
+        else:
+            self.rot_threshold[:] = self._base_rot_threshold
+            self.rot_action_bounds[:] = self._base_rot_action_bounds
 
     def _init_tensors(self):
         """Initialize tensors once."""

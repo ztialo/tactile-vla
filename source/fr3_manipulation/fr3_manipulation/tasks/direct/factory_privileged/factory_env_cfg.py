@@ -84,6 +84,8 @@ class ActionSlowdownCurriculumCfg:
     enabled: bool = False
     start_scale: float = 1.0
     end_scale: float = 1.0
+    scale_rotation: bool = True
+    rotation_scale_strength: float = 1.0
     total_steps: int = 0
     trigger_success_rate: float = 0.0
 
