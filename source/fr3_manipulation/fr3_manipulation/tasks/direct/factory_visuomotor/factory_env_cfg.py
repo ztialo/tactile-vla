@@ -133,6 +133,15 @@ class FactoryEnvCfg(DirectRLEnvCfg):
         spawn=None,
     )
 
+    side_view_camera: TiledCameraCfg = TiledCameraCfg(
+        prim_path="/World/envs/env_.*/Robot/fr3/side_view_camera",
+        update_period=0.0,
+        height=CAMERA_HEIGHT,
+        width=CAMERA_WIDTH,
+        data_types=["rgb"],
+        spawn=None,
+    )
+
 
 @configclass
 class FactoryTaskPegInsertCfg(FactoryEnvCfg):

@@ -262,6 +262,23 @@ def _format_duration(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def _center_crop(image: torch.Tensor, crop_height: int, crop_width: int) -> torch.Tensor:
+    """Crop an NHWC image tensor to a centered window while excluding the bottom artifact row."""
+    height, width = image.shape[-3], image.shape[-2]
+    if crop_height > height or crop_width > width:
+        raise ValueError(
+            f"Requested crop ({crop_height}, {crop_width}) exceeds image size ({height}, {width})."
+        )
+    effective_height = height - 1
+    if crop_height > effective_height:
+        raise ValueError(
+            f"Requested crop height {crop_height} exceeds artifact-trimmed image height {effective_height}."
+        )
+    top = (effective_height - crop_height) // 2
+    left = (width - crop_width) // 2
+    return image[..., top : top + crop_height, left : left + crop_width, :]
+
+
 def _compute_teacher_policy_obs(base_env) -> torch.Tensor:
     """Build the privileged teacher actor observation from a visuomotor env instance."""
     noisy_fixed_pos = base_env.fixed_pos_obs_frame + base_env.init_fixed_pos_obs_noise
@@ -447,6 +464,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             success_tail_remaining = torch.zeros(base_env.num_envs, dtype=torch.int64, device=base_env.device)
             success_tail_steps = max(int(round(args_cli.success_tail_seconds / dt)), 0)
         pre_action_wait_steps = max(int(round(args_cli.pre_action_wait_seconds / dt)), 0)
+        rgb_crop_height = 240
+        rgb_crop_width = 240
         h5_file.attrs["task"] = args_cli.task
         h5_file.attrs["checkpoint"] = resume_path
         h5_file.attrs["num_envs"] = base_env.num_envs
@@ -461,6 +480,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         h5_file.attrs["right_ft_body_name"] = "fr3_right_ft"
         h5_file.attrs["ft_wrench_order"] = "fx,fy,fz,tx,ty,tz"
         h5_file.attrs["episode_layout"] = "contiguous_per_env_episode"
+        h5_file.attrs["wrist_rgb_resolution"] = np.asarray([rgb_crop_width, rgb_crop_height], dtype=np.int64)
+        h5_file.attrs["replay_center_crop"] = "216x216"
         print(f"[INFO] Visuotactile rollout HDF5 log: {os.path.abspath(args_cli.log_path)}")
         print(f"[INFO] Logging env ids: {h5_file.attrs['logged_env_ids'].tolist()}")
 
@@ -533,6 +554,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             wrist_rgb = torch.clamp(wrist_rgb * 255.0, 0.0, 255.0).to(torch.uint8)
                         else:
                             wrist_rgb = wrist_rgb.to(torch.uint8)
+                        wrist_rgb = _center_crop(wrist_rgb, rgb_crop_height, rgb_crop_width)
                         batch["wrist_rgb"] = _tensor_to_numpy(wrist_rgb, log_env_ids)
                     if args_cli.log_success_only:
                         active_mask = ~suppress_after_success[log_env_ids].detach().cpu().numpy()

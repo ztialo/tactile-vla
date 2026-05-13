@@ -312,14 +312,19 @@ def _format_duration(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
-def _center_bottom_crop(image: torch.Tensor, crop_height: int, crop_width: int) -> torch.Tensor:
-    """Crop an NHWC image tensor to a bottom-aligned centered window."""
+def _center_crop(image: torch.Tensor, crop_height: int, crop_width: int) -> torch.Tensor:
+    """Crop an NHWC image tensor to a centered window while excluding the bottom artifact row."""
     height, width = image.shape[-3], image.shape[-2]
     if crop_height > height or crop_width > width:
         raise ValueError(
             f"Requested crop ({crop_height}, {crop_width}) exceeds image size ({height}, {width})."
         )
-    top = height - crop_height
+    effective_height = height - 1
+    if crop_height > effective_height:
+        raise ValueError(
+            f"Requested crop height {crop_height} exceeds artifact-trimmed image height {effective_height}."
+        )
+    top = (effective_height - crop_height) // 2
     left = (width - crop_width) // 2
     return image[..., top : top + crop_height, left : left + crop_width, :]
 
@@ -548,8 +553,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             success_tail_remaining = torch.zeros(base_env.num_envs, dtype=torch.int64, device=base_env.device)
             success_tail_steps = max(int(round(args_cli.success_tail_seconds / dt)), 0)
         pre_action_wait_steps = max(int(round(args_cli.pre_action_wait_seconds / dt)), 0)
-        rgb_crop_height = 256
-        rgb_crop_width = 256
+        rgb_crop_height = 240
+        rgb_crop_width = 240
         h5_file.attrs["task"] = args_cli.task
         h5_file.attrs["checkpoint"] = resume_path
         h5_file.attrs["num_envs"] = base_env.num_envs
@@ -562,7 +567,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         h5_file.attrs["successful_episodes_target"] = args_cli.successful_episodes_target
         h5_file.attrs["success_tail_seconds"] = args_cli.success_tail_seconds
         h5_file.attrs["pre_action_wait_seconds"] = args_cli.pre_action_wait_seconds
-        h5_file.attrs["wrist_rgb_crop"] = "centerbottom_256x256"
+        h5_file.attrs["wrist_rgb_resolution"] = np.asarray([rgb_crop_width, rgb_crop_height], dtype=np.int64)
+        h5_file.attrs["side_view_rgb_resolution"] = np.asarray([rgb_crop_width, rgb_crop_height], dtype=np.int64)
+        h5_file.attrs["replay_center_crop"] = "216x216"
         h5_file.attrs["action_scale"] = args_cli.action_scale
         h5_file.attrs["action_scale_z"] = args_cli.action_scale_z
         print(f"[INFO] Vision rollout HDF5 log: {os.path.abspath(args_cli.log_path)}")
@@ -635,8 +642,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             wrist_rgb = torch.clamp(wrist_rgb * 255.0, 0.0, 255.0).to(torch.uint8)
                         else:
                             wrist_rgb = wrist_rgb.to(torch.uint8)
-                        wrist_rgb = _center_bottom_crop(wrist_rgb, rgb_crop_height, rgb_crop_width)
+                        wrist_rgb = _center_crop(wrist_rgb, rgb_crop_height, rgb_crop_width)
                         batch["wrist_rgb"] = _tensor_to_numpy(wrist_rgb, log_env_ids)
+                        if not hasattr(base_env, "_side_view_camera") or base_env._side_view_camera is None:
+                            raise AttributeError(
+                                "The env has no _side_view_camera. Update the visuomotor robot USD/config or pass --no_log_images."
+                            )
+                        side_view_rgb = base_env._side_view_camera.data.output["rgb"][..., :3]
+                        if side_view_rgb.dtype.is_floating_point:
+                            side_view_rgb = torch.clamp(side_view_rgb * 255.0, 0.0, 255.0).to(torch.uint8)
+                        else:
+                            side_view_rgb = side_view_rgb.to(torch.uint8)
+                        side_view_rgb = _center_crop(side_view_rgb, rgb_crop_height, rgb_crop_width)
+                        batch["side_view_rgb"] = _tensor_to_numpy(side_view_rgb, log_env_ids)
                         if args_cli.log_depth:
                             if "distance_to_image_plane" not in base_env._wrist_camera.data.output:
                                 raise KeyError(
@@ -650,7 +668,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                                 neginf=0.0,
                             ).to(torch.float32)
                             wrist_depth = wrist_depth.unsqueeze(-1)
-                            wrist_depth = _center_bottom_crop(wrist_depth, rgb_crop_height, rgb_crop_width).squeeze(-1)
+                            wrist_depth = _center_crop(wrist_depth, rgb_crop_height, rgb_crop_width).squeeze(-1)
                             batch["wrist_depth"] = _tensor_to_numpy(wrist_depth, log_env_ids, dtype=np.float32)
                     if args_cli.log_success_only:
                         active_mask = ~suppress_after_success[log_env_ids].detach().cpu().numpy()

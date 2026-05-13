@@ -5,7 +5,7 @@ dataset_path: logs/vision_rollouts/gear_mesh_500expert_demos_5dg.hdf5
 shape_meta: &shape_meta
   obs:
     wrist:
-      shape: [3, 256, 256]
+      shape: [3, 216, 216]
       type: rgb
     state:
       shape: [8]
@@ -28,6 +28,6 @@ dataset:
   seed: 42
   max_train_episodes: null
   max_val_episodes: null
-  image_crop_size: 256
+  image_crop_size: 216
   use_ft: false
   rotation_rep: raw

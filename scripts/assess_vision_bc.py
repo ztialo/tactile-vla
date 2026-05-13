@@ -26,7 +26,7 @@ parser.add_argument(
     type=str,
     default="pov",
     choices=["pov", "zed"],
-    help="Video source: `pov` records the viewer perspective, `zed` records the wrist camera stream.",
+    help="Video source: `pov` records the side-view camera stream, `zed` records the wrist camera stream.",
 )
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument(
@@ -173,9 +173,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # TiledCamera needs real cloned USD prims, not Fabric-only clones.
     env_cfg.scene.clone_in_fabric = False
-    if args_cli.video and args_cli.video_src == "pov":
-        _set_default_factory_video_view(env_cfg, args_cli.task)
-
     checkpoint_path = os.path.abspath(args_cli.checkpoint)
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
@@ -204,16 +201,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     if args_cli.video:
         if args_cli.video_src == "pov":
-            video_kwargs = {
-                "video_folder": os.path.join(os.path.dirname(checkpoint_path), "videos", "offline_bc_assess"),
-                "step_trigger": lambda step: step == 0,
-                "video_length": effective_video_length,
-                "disable_logger": True,
-            }
-            print("[INFO] Recording POV videos during assessment.")
-            print_dict(video_kwargs, nesting=4)
-            env = gym.wrappers.RecordVideo(env, **video_kwargs)
-            base_env = env.unwrapped
+            pov_video_dir = os.path.join(os.path.dirname(checkpoint_path), "videos", "offline_bc_assess")
+            os.makedirs(pov_video_dir, exist_ok=True)
+            pov_video_path = os.path.join(pov_video_dir, f"{args_cli.task.replace(':', '_')}_side_view.mp4")
+            print(f"[INFO] Recording side-view video to: {pov_video_path}")
+            pov_writer = imageio.get_writer(pov_video_path, fps=max(int(round(1.0 / base_env.step_dt)), 1))
         else:
             zed_video_dir = os.path.join(os.path.dirname(checkpoint_path), "videos", "offline_bc_assess_zed")
             os.makedirs(zed_video_dir, exist_ok=True)
@@ -221,6 +213,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print(f"[INFO] Recording ZED wrist video to: {zed_video_path}")
             zed_writer = imageio.get_writer(zed_video_path, fps=max(int(round(1.0 / base_env.step_dt)), 1))
     else:
+        pov_writer = None
         zed_writer = None
 
     device = torch.device(args_cli.device or env_cfg.sim.device)
@@ -238,6 +231,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             actions = policy.act(base_env)
             _, _, terminated, truncated, extras = env.step(actions)
             dones = torch.logical_or(terminated, truncated)
+            if pov_writer is not None:
+                if getattr(base_env, "_side_view_camera", None) is None:
+                    raise RuntimeError("POV video requested, but no side-view camera is configured on the environment.")
+                side_view_batch = base_env._side_view_camera.data.output["rgb"][..., :3]
+                pov_writer.append_data(_to_uint8_rgb(side_view_batch[0]))
             if zed_writer is not None:
                 zed_batch = base_env._wrist_camera.data.output["rgb"]
                 zed_writer.append_data(_make_zed_grid(zed_batch))
@@ -277,6 +275,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         mean_success_rate = torch.stack(loop_success_rates).mean()
         print(f"[INFO] Mean episode success rate over {len(loop_success_rates)} loop(s): {_to_float(mean_success_rate):.4f}")
 
+    if pov_writer is not None:
+        pov_writer.close()
     if zed_writer is not None:
         zed_writer.close()
 

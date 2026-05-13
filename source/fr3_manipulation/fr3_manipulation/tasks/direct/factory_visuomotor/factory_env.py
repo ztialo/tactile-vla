@@ -153,6 +153,7 @@ class FactoryEnv(DirectRLEnv):
 
         self._robot = Articulation(self.cfg.robot)
         self._wrist_camera = TiledCamera(self.cfg.wrist_camera) if self.cfg.wrist_camera is not None else None
+        self._side_view_camera = TiledCamera(self.cfg.side_view_camera) if self.cfg.side_view_camera is not None else None
         self._fixed_asset = Articulation(self.cfg_task.fixed_asset)
         self._held_asset = Articulation(self.cfg_task.held_asset)
         if self.cfg_task.name == "gear_mesh":
@@ -167,6 +168,8 @@ class FactoryEnv(DirectRLEnv):
         self.scene.articulations["robot"] = self._robot
         if self._wrist_camera is not None:
             self.scene.sensors["wrist_camera"] = self._wrist_camera
+        if self._side_view_camera is not None:
+            self.scene.sensors["side_view_camera"] = self._side_view_camera
         self.scene.articulations["fixed_asset"] = self._fixed_asset
         self.scene.articulations["held_asset"] = self._held_asset
         if self.cfg_task.name == "gear_mesh":

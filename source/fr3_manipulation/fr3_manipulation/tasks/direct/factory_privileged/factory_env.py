@@ -123,6 +123,8 @@ class FactoryEnv(DirectRLEnv):
         self.left_finger_body_idx = self._get_body_index("fr3_leftfinger")
         self.right_finger_body_idx = self._get_body_index("fr3_rightfinger")
         self.fingertip_body_idx = self._get_body_index("fr3_hand_tcp", "fr3_hand")
+        self.left_ft_body_idx = self._get_body_index("fr3_left_ft")
+        self.right_ft_body_idx = self._get_body_index("fr3_right_ft")
 
         # Tensors for finite-differencing.
         self.last_update_timestamp = 0.0  # Note: This is for finite differencing body velocities.
@@ -188,6 +190,8 @@ class FactoryEnv(DirectRLEnv):
         self.fingertip_midpoint_quat = self._robot.data.body_quat_w[:, self.fingertip_body_idx]
         self.fingertip_midpoint_linvel = self._robot.data.body_lin_vel_w[:, self.fingertip_body_idx]
         self.fingertip_midpoint_angvel = self._robot.data.body_ang_vel_w[:, self.fingertip_body_idx]
+        self.left_ft_wrench = self._robot.data.body_incoming_joint_wrench_b[:, self.left_ft_body_idx]
+        self.right_ft_wrench = self._robot.data.body_incoming_joint_wrench_b[:, self.right_ft_body_idx]
 
         jacobians = self._robot.root_physx_view.get_jacobians()
 
@@ -233,6 +237,8 @@ class FactoryEnv(DirectRLEnv):
             "fingertip_quat": self.fingertip_midpoint_quat,
             "ee_linvel": self.ee_linvel_fd,
             "ee_angvel": self.ee_angvel_fd,
+            "left_ft_wrench": self.left_ft_wrench,
+            "right_ft_wrench": self.right_ft_wrench,
             "prev_actions": prev_actions,
         }
 
@@ -253,6 +259,8 @@ class FactoryEnv(DirectRLEnv):
             "task_prop_gains": self.task_prop_gains,
             "pos_threshold": self.pos_threshold,
             "rot_threshold": self.rot_threshold,
+            "left_ft_wrench": self.left_ft_wrench,
+            "right_ft_wrench": self.right_ft_wrench,
             "prev_actions": prev_actions,
         }
         return obs_dict, state_dict

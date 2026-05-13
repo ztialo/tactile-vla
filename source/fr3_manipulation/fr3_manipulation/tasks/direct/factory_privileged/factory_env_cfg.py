@@ -10,7 +10,7 @@ from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
 
-from ..robots.fr3_wc_cfg import FR3_WC_CFG
+from ..robots.fr3_ft_wc_cfg import FR3_FT_WC_CFG
 from .factory_tasks_cfg import FactoryTask, GearMesh, NutThread, PegInsert
 
 OBS_DIM_CFG = {
@@ -19,6 +19,8 @@ OBS_DIM_CFG = {
     "fingertip_quat": 4,
     "ee_linvel": 3,
     "ee_angvel": 3,
+    "left_ft_wrench": 6,
+    "right_ft_wrench": 6,
 }
 
 STATE_DIM_CFG = {
@@ -39,6 +41,8 @@ STATE_DIM_CFG = {
     "ema_factor": 1,
     "pos_threshold": 3,
     "rot_threshold": 3,
+    "left_ft_wrench": 6,
+    "right_ft_wrench": 6,
 }
 
 
@@ -144,7 +148,7 @@ class FactoryEnvCfg(DirectRLEnvCfg):
 
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=128, env_spacing=2.0, clone_in_fabric=True)
 
-    robot: ArticulationCfg = FR3_WC_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    robot: ArticulationCfg = FR3_FT_WC_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
 
 @configclass

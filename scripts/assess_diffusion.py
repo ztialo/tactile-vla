@@ -34,7 +34,7 @@ parser.add_argument(
     type=str,
     default="pov",
     choices=["pov", "zed", "both"],
-    help="Video source: `pov` records the viewer perspective, `zed` records the wrist camera stream, `both` writes a side-by-side POV+wrist video.",
+    help="Video source: `pov` records the side-view camera stream, `zed` records the wrist camera stream, `both` writes a side-by-side side-view+wrist video.",
 )
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument(
@@ -211,19 +211,22 @@ def _center_crop_numpy(frame: np.ndarray, target_h: int, target_w: int) -> np.nd
     return frame[top : top + target_h, left : left + target_w, :]
 
 
-def _make_pov_wrist_side_by_side(
-    pov_frame, wrist_rgb_batch: torch.Tensor, crop_size: int | None = None
+def _make_side_view_wrist_side_by_side(
+    side_view_rgb_batch: torch.Tensor, wrist_rgb_batch: torch.Tensor, crop_size: int | None = None
 ) -> np.ndarray:
-    pov = _to_uint8_rgb_array(pov_frame)
+    side_view = side_view_rgb_batch[..., :3]
     if crop_size is not None:
+        side_view = _center_crop_torch(side_view, crop_size)
         wrist_rgb_batch = _center_crop_torch(wrist_rgb_batch[..., :3], crop_size)
     else:
+        side_view = side_view[..., :3]
         wrist_rgb_batch = wrist_rgb_batch[..., :3]
+    side_view = _to_uint8_rgb(side_view[0])
     wrist = _to_uint8_rgb(wrist_rgb_batch[0])
     wrist_h, wrist_w = wrist.shape[:2]
-    if pov.shape[0] != wrist_h or pov.shape[1] != wrist_w:
-        pov = _center_crop_numpy(pov, wrist_h, wrist_w)
-    return np.concatenate((pov, wrist), axis=1)
+    if side_view.shape[0] != wrist_h or side_view.shape[1] != wrist_w:
+        side_view = _center_crop_numpy(side_view, wrist_h, wrist_w)
+    return np.concatenate((side_view, wrist), axis=1)
 
 
 def _center_crop_torch(images: torch.Tensor, crop_size: int | None) -> torch.Tensor:
@@ -342,8 +345,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _apply_factory_init_overrides(env_cfg)
 
     env_cfg.scene.clone_in_fabric = False
-    if args_cli.video and args_cli.video_src in ("pov", "both"):
-        _set_default_factory_video_view(env_cfg, args_cli.task)
 
     checkpoint_path = os.path.abspath(args_cli.checkpoint)
     if not os.path.exists(checkpoint_path):
@@ -373,29 +374,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         video_dir = os.path.join(video_root, "videos")
         os.makedirs(video_dir, exist_ok=True)
         if args_cli.video_src == "pov":
-            video_kwargs = {
-                "video_folder": video_dir,
-                "step_trigger": lambda step: step == 0,
-                "video_length": effective_video_length,
-                "disable_logger": True,
-            }
-            print("[INFO] Recording POV videos during assessment.")
-            print_dict(video_kwargs, nesting=4)
-            env = gym.wrappers.RecordVideo(env, **video_kwargs)
-            base_env = env.unwrapped
+            pov_video_path = os.path.join(video_dir, f"{args_cli.task.replace(':', '_')}_side_view.mp4")
+            print(f"[INFO] Recording side-view video to: {pov_video_path}")
+            pov_writer = imageio.get_writer(pov_video_path, fps=max(int(round(1.0 / base_env.step_dt)), 1))
             zed_writer = None
             both_writer = None
         elif args_cli.video_src == "both":
             both_video_path = os.path.join(video_dir, f"{args_cli.task.replace(':', '_')}_both.mp4")
-            print(f"[INFO] Recording side-by-side POV+wrist video to: {both_video_path}")
+            print(f"[INFO] Recording side-by-side side-view+wrist video to: {both_video_path}")
             both_writer = imageio.get_writer(both_video_path, fps=max(int(round(1.0 / base_env.step_dt)), 1))
+            pov_writer = None
             zed_writer = None
         else:
             zed_video_path = os.path.join(video_dir, f"{args_cli.task.replace(':', '_')}_zed.mp4")
             print(f"[INFO] Recording ZED wrist video to: {zed_video_path}")
             zed_writer = imageio.get_writer(zed_video_path, fps=max(int(round(1.0 / base_env.step_dt)), 1))
+            pov_writer = None
             both_writer = None
     else:
+        pov_writer = None
         zed_writer = None
         both_writer = None
 
@@ -414,13 +411,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             actions = policy.act(base_env)
             _, _, terminated, truncated, extras = env.step(actions)
             dones = torch.logical_or(terminated, truncated)
+            if pov_writer is not None:
+                if getattr(base_env, "_side_view_camera", None) is None:
+                    raise RuntimeError("POV video requested, but no side-view camera is configured on the environment.")
+                side_view_batch = base_env._side_view_camera.data.output["rgb"]
+                side_view_frame = side_view_batch[..., :3]
+                if policy.image_crop_size is not None:
+                    side_view_frame = _center_crop_torch(side_view_frame, policy.image_crop_size)
+                pov_writer.append_data(_to_uint8_rgb(side_view_frame[0]))
             if zed_writer is not None:
                 zed_batch = base_env._wrist_camera.data.output["rgb"]
                 zed_writer.append_data(_make_zed_grid(zed_batch, policy.image_crop_size))
             if both_writer is not None:
-                pov_frame = env.render()
+                if getattr(base_env, "_side_view_camera", None) is None:
+                    raise RuntimeError("Combined video requested, but no side-view camera is configured on the environment.")
+                side_view_batch = base_env._side_view_camera.data.output["rgb"]
                 wrist_batch = base_env._wrist_camera.data.output["rgb"]
-                both_writer.append_data(_make_pov_wrist_side_by_side(pov_frame, wrist_batch, policy.image_crop_size))
+                both_writer.append_data(
+                    _make_side_view_wrist_side_by_side(side_view_batch, wrist_batch, policy.image_crop_size)
+                )
 
             if len(dones) > 0 and torch.all(dones).item():
                 completed_loops += 1
@@ -458,6 +467,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         mean_success_rate = torch.stack(loop_success_rates).mean()
         print(f"[INFO] Mean episode success rate over {len(loop_success_rates)} loop(s): {_to_float(mean_success_rate):.4f}")
 
+    if pov_writer is not None:
+        pov_writer.close()
     if zed_writer is not None:
         zed_writer.close()
     if both_writer is not None:

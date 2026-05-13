@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay wrist RGB frames from an H5 demo and plot 6-axis FT wrenches."""
+"""Replay demo RGB frames from an H5 file and optionally plot 6-axis FT wrenches."""
 
 from __future__ import annotations
 
@@ -14,12 +14,14 @@ import numpy as np
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Replay one demo from an H5 file and plot FT wrench data.")
-    parser.add_argument("--h5", type=str, required=True, help="Path to H5 file (must contain done + wrist_rgb).")
+    parser.add_argument(
+        "--h5", type=str, required=True, help="Path to H5 file (must contain done + wrist_rgb, and usually side_view_rgb)."
+    )
     parser.add_argument(
         "--vision",
         action="store_true",
-        default=False,
-        help="Replay RGB only and do not require tactile FT datasets.",
+        default=True,
+        help="Replay RGB only and do not require tactile FT datasets. Uses both side-view and wrist RGB when available.",
     )
     parser.add_argument(
         "--demo",
@@ -39,6 +41,13 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Optional center-crop size applied to wrist RGB before writing the MP4.",
+    )
+    parser.add_argument(
+        "--res",
+        type=str,
+        choices=("raw", "crop", "both"),
+        default="raw",
+        help="Replay resolution mode. `raw` writes the stored image, `crop` writes the center-cropped image, `both` writes both videos.",
     )
     parser.add_argument(
         "--square_wrist",
@@ -123,6 +132,23 @@ def _default_fps_from_h5(h5_file: h5py.File) -> int:
     return 15
 
 
+def _default_crop_size_from_h5(h5_file: h5py.File) -> int | None:
+    """Infer default replay crop size from H5 metadata."""
+    value = h5_file.attrs.get("replay_center_crop", None)
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    text = str(value).lower().strip()
+    if "x" in text:
+        first, second = text.split("x", 1)
+        if first == second and first.isdigit():
+            return int(first)
+    if text.isdigit():
+        return int(text)
+    return None
+
+
 def _resize_image_nearest(image: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
     """Resize an HWC uint8 image with nearest-neighbor sampling."""
     if target_h <= 0 or target_w <= 0:
@@ -142,6 +168,16 @@ def _resize_to_height(image: np.ndarray, target_h: int) -> np.ndarray:
     src_h, src_w = image.shape[:2]
     target_w = max(int(round(src_w * target_h / src_h)), 1)
     return _resize_image_nearest(image, target_h, target_w)
+
+
+def _concat_views(left: np.ndarray, right: np.ndarray, target_h: int | None = None) -> np.ndarray:
+    """Concatenate two HWC RGB frames side-by-side, resizing to a common height when needed."""
+    if target_h is not None:
+        left = _resize_to_height(left, target_h)
+        right = _resize_to_height(right, target_h)
+    elif left.shape[0] != right.shape[0]:
+        right = _resize_to_height(right, left.shape[0])
+    return np.concatenate((left, right), axis=1)
 
 
 def _moving_average_ft(values: np.ndarray, window: int) -> np.ndarray:
@@ -276,6 +312,8 @@ def main():
     out_dir = Path(args.output_root) / h5_path.name / demo_label
     out_dir.mkdir(parents=True, exist_ok=True)
     video_path = out_dir / "replay.mp4"
+    raw_video_path = out_dir / "replay_raw.mp4"
+    crop_video_path = out_dir / "replay_crop.mp4"
     plot_path = out_dir / "ft_wrench.png"
     sync_video_path = out_dir / "replay_ft_sync.mp4"
 
@@ -302,11 +340,19 @@ def main():
         start = int(selected_bounds[0][0])
         end = int(selected_bounds[-1][1])
 
-        wrist_rgb = np.asarray(h5_file["wrist_rgb"][rows], dtype=np.uint8)
+        wrist_rgb_raw = np.asarray(h5_file["wrist_rgb"][rows], dtype=np.uint8)
+        side_view_rgb_raw = None
+        if "side_view_rgb" in h5_file:
+            side_view_rgb_raw = np.asarray(h5_file["side_view_rgb"][rows], dtype=np.uint8)
+        fps = args.fps if args.fps is not None else _default_fps_from_h5(h5_file)
+        crop_size = args.img_size if args.img_size is not None else _default_crop_size_from_h5(h5_file)
+        wrist_rgb = wrist_rgb_raw
         if args.square_wrist:
             wrist_rgb = _center_square_numpy(wrist_rgb)
-        wrist_rgb = _center_crop_numpy(wrist_rgb, args.img_size)
-        fps = args.fps if args.fps is not None else _default_fps_from_h5(h5_file)
+        wrist_rgb = _center_crop_numpy(wrist_rgb, crop_size)
+        side_view_rgb = None
+        if side_view_rgb_raw is not None:
+            side_view_rgb = _center_crop_numpy(side_view_rgb_raw, crop_size)
         left_ft = None
         right_ft = None
         axis_names = None
@@ -318,9 +364,30 @@ def main():
             right_ft_filtered = _moving_average_ft(right_ft, args.ft_ma_window)
         x = np.arange(wrist_rgb.shape[0], dtype=np.int64)
 
-    with imageio.get_writer(str(video_path), fps=max(fps, 1), macro_block_size=1) as writer:
-        for frame in wrist_rgb:
-            writer.append_data(_pad_to_even_hw(frame))
+    wrote_raw_video = False
+    if args.vision and args.res in ("raw", "both"):
+        target_path = raw_video_path if args.res == "both" else video_path
+        raw_sync_height = args.sync_height if side_view_rgb_raw is not None else None
+        with imageio.get_writer(str(target_path), fps=max(fps, 1), macro_block_size=1) as writer:
+            for frame_idx, wrist_frame in enumerate(wrist_rgb_raw):
+                if side_view_rgb_raw is not None:
+                    frame = _concat_views(side_view_rgb_raw[frame_idx], wrist_frame, raw_sync_height)
+                else:
+                    frame = wrist_frame
+                writer.append_data(_pad_to_even_hw(frame))
+        wrote_raw_video = True
+
+    wrote_crop_video = False
+    if args.res in ("crop", "both"):
+        target_path = crop_video_path if args.res == "both" else video_path
+        with imageio.get_writer(str(target_path), fps=max(fps, 1), macro_block_size=1) as writer:
+            for frame_idx, wrist_frame in enumerate(wrist_rgb):
+                if args.vision and side_view_rgb is not None:
+                    frame = _concat_views(side_view_rgb[frame_idx], wrist_frame, args.sync_height)
+                else:
+                    frame = wrist_frame
+                writer.append_data(_pad_to_even_hw(frame))
+        wrote_crop_video = True
 
     if not args.vision:
         fig, axes = plt.subplots(3, 2, figsize=(12, 10), sharex=True)
@@ -407,7 +474,12 @@ def main():
                 writer.append_data(_pad_to_even_hw(synced))
         plt.close(ft_fig)
 
-    print(f"[INFO] Wrote video: {video_path}")
+    if args.res in ("raw", "crop"):
+        print(f"[INFO] Wrote video: {video_path}")
+    if wrote_raw_video and args.res == "both":
+        print(f"[INFO] Wrote raw:   {raw_video_path}")
+    if wrote_crop_video and args.res == "both":
+        print(f"[INFO] Wrote crop:  {crop_video_path}")
     if not args.vision:
         print(f"[INFO] Wrote plot:  {plot_path}")
         print(f"[INFO] Wrote sync:  {sync_video_path}")
