@@ -33,10 +33,16 @@ parser.add_argument(
     "--video_src",
     type=str,
     default="pov",
-    choices=["pov", "zed", "both"],
-    help="Video source: `pov` records the side-view camera stream, `zed` records the wrist camera stream, `both` writes a side-by-side side-view+wrist video.",
+    choices=["pov", "zed", "both", "side_grid"],
+    help="Video source: `pov` records env-0 side-view, `side_grid` records a 3x3 side-view grid, `zed` records wrist, `both` writes side-view+wrist.",
 )
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
+parser.add_argument(
+    "--side_view_grid_9",
+    action="store_true",
+    default=False,
+    help="Force num_envs=9 and record a 3x3 side-view camera grid. Implies --video --video_src side_grid.",
+)
 parser.add_argument(
     "--num_loops",
     type=int,
@@ -200,6 +206,28 @@ def _make_zed_grid(rgb_batch: torch.Tensor, crop_size: int | None = None):
     return np.concatenate((np.concatenate(top, axis=1), np.concatenate(bottom, axis=1)), axis=0)
 
 
+def _make_rgb_grid(
+    rgb_batch: torch.Tensor, rows: int, cols: int, crop_size: int | None = None, label: str = "camera"
+) -> np.ndarray:
+    if crop_size is not None:
+        rgb_batch = _center_crop_torch(rgb_batch[..., :3], crop_size)
+    else:
+        rgb_batch = rgb_batch[..., :3]
+    num_frames = rows * cols
+    frames = [_to_uint8_rgb(rgb_batch[i]) for i in range(min(rgb_batch.shape[0], num_frames))]
+    if not frames:
+        raise RuntimeError(f"No {label} frames available for grid video recording.")
+    frame_h, frame_w, frame_c = frames[0].shape
+    blank = np.zeros((frame_h, frame_w, frame_c), dtype=np.uint8)
+    while len(frames) < num_frames:
+        frames.append(blank.copy())
+    grid_rows = []
+    for row_idx in range(rows):
+        start = row_idx * cols
+        grid_rows.append(np.concatenate(frames[start : start + cols], axis=1))
+    return np.concatenate(grid_rows, axis=0)
+
+
 def _center_crop_numpy(frame: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
     height, width = frame.shape[:2]
     if target_h > height or target_w > width:
@@ -269,8 +297,13 @@ class OfflineDiffusionInferencePolicy:
         self.model.eval()
         self.image_crop_size = cfg.task.dataset.get("image_crop_size")
         self.use_ft = bool(cfg.task.dataset.get("use_ft", False)) or args_cli.ft
-        self.n_obs_steps = int(cfg.n_obs_steps)
-        self._wrist_history = None
+        self.n_obs_steps = int(cfg.get("n_obs_steps", cfg.task.dataset.n_obs_steps))
+        self.rgb_keys = [
+            key for key, attr in cfg.shape_meta.obs.items() if attr.get("type", "low_dim") == "rgb"
+        ]
+        if "wrist" not in self.rgb_keys:
+            raise ValueError(f"Offline diffusion assessment requires a wrist RGB obs key, got {self.rgb_keys}.")
+        self._image_histories = None
         self._state_history = None
         self._action_plan = None
         self._action_step = 0
@@ -279,25 +312,31 @@ class OfflineDiffusionInferencePolicy:
         self._right_ft_body_idx = None
 
     def reset(self):
-        self._wrist_history = None
+        self._image_histories = None
         self._state_history = None
         self._action_plan = None
         self._action_step = 0
 
-    def _normalize_images(self, wrist_rgb: torch.Tensor) -> torch.Tensor:
-        wrist_rgb = _center_crop_torch(wrist_rgb, self.image_crop_size)
-        wrist_rgb = wrist_rgb.permute(0, 3, 1, 2).contiguous()
-        return wrist_rgb.float() / 255.0
+    def _normalize_images(self, rgb: torch.Tensor) -> torch.Tensor:
+        rgb = _center_crop_torch(rgb, self.image_crop_size)
+        rgb = rgb.permute(0, 3, 1, 2).contiguous()
+        return rgb.float() / 255.0
 
     def _maybe_init_ft(self, env):
         if not self.use_ft or self._robot is not None:
             return
         self._robot, self._left_ft_body_idx, self._right_ft_body_idx = _resolve_ft_body_indices(env)
 
-    def _build_current_obs(self, env) -> tuple[torch.Tensor, torch.Tensor]:
+    def _build_current_obs(self, env) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
         if env._wrist_camera is None:
             raise RuntimeError("Offline diffusion policy requires wrist camera data, but no wrist camera is configured.")
-        wrist = self._normalize_images(env._wrist_camera.data.output["rgb"][..., :3])
+        images = {"wrist": self._normalize_images(env._wrist_camera.data.output["rgb"][..., :3])}
+        if "side_view" in self.rgb_keys:
+            if getattr(env, "_side_view_camera", None) is None:
+                raise RuntimeError(
+                    "Offline diffusion policy requires side_view image data, but no side-view camera is configured."
+                )
+            images["side_view"] = self._normalize_images(env._side_view_camera.data.output["rgb"][..., :3])
         gripper_pos = torch.mean(env.joint_pos[:, 7:], dim=1, keepdim=True)
         state_parts = [env.fingertip_midpoint_pos, env.fingertip_midpoint_quat, gripper_pos]
         if self.use_ft:
@@ -305,22 +344,28 @@ class OfflineDiffusionInferencePolicy:
             left_ft_wrench = self._robot.data.body_incoming_joint_wrench_b[:, self._left_ft_body_idx]
             right_ft_wrench = self._robot.data.body_incoming_joint_wrench_b[:, self._right_ft_body_idx]
             state_parts.extend((left_ft_wrench, right_ft_wrench))
-        return wrist, torch.cat(state_parts, dim=-1)
+        return images, torch.cat(state_parts, dim=-1)
 
     @torch.inference_mode()
     def act(self, env) -> torch.Tensor:
-        wrist, state = self._build_current_obs(env)
-        if self._wrist_history is None or self._state_history is None:
-            self._wrist_history = wrist.unsqueeze(1).repeat(1, self.n_obs_steps, 1, 1, 1)
+        images, state = self._build_current_obs(env)
+        if self._image_histories is None or self._state_history is None:
+            self._image_histories = {
+                key: value.unsqueeze(1).repeat(1, self.n_obs_steps, 1, 1, 1)
+                for key, value in images.items()
+            }
             self._state_history = state.unsqueeze(1).repeat(1, self.n_obs_steps, 1)
         else:
-            self._wrist_history = torch.roll(self._wrist_history, shifts=-1, dims=1)
-            self._wrist_history[:, -1] = wrist
+            for key, value in images.items():
+                self._image_histories[key] = torch.roll(self._image_histories[key], shifts=-1, dims=1)
+                self._image_histories[key][:, -1] = value
             self._state_history = torch.roll(self._state_history, shifts=-1, dims=1)
             self._state_history[:, -1] = state
 
         if self._action_plan is None or self._action_step >= self._action_plan.shape[1]:
-            result = self.model.predict_action({"wrist": self._wrist_history, "state": self._state_history})
+            obs_dict = {key: self._image_histories[key] for key in self.rgb_keys}
+            obs_dict["state"] = self._state_history
+            result = self.model.predict_action(obs_dict)
             self._action_plan = result["action"]
             self._action_step = 0
 
@@ -333,15 +378,34 @@ class OfflineDiffusionInferencePolicy:
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg):
     del agent_cfg
 
+    if args_cli.side_view_grid_9:
+        args_cli.video = True
+        args_cli.video_src = "side_grid"
+        args_cli.num_envs = 9
+        print("[INFO] Side-view 3x3 grid enabled: forcing --video --video_src side_grid --num_envs 9.")
+
     if args_cli.num_envs is not None:
         env_cfg.scene.num_envs = args_cli.num_envs
     if args_cli.seed is not None:
         env_cfg.seed = args_cli.seed
     if args_cli.device is not None:
         env_cfg.sim.device = args_cli.device
-    if args_cli.random_orn is not None and hasattr(env_cfg, "task") and hasattr(env_cfg.task, "randomize_hand_init_tilt"):
-        env_cfg.task.randomize_hand_init_tilt = True
-        env_cfg.task.hand_init_tilt_noise_deg = args_cli.random_orn
+    if args_cli.random_orn is not None and hasattr(env_cfg, "task"):
+        if hasattr(env_cfg.task, "randomize_hand_init_tilt"):
+            env_cfg.task.randomize_hand_init_tilt = True
+            env_cfg.task.hand_init_tilt_noise_deg = args_cli.random_orn
+        if hasattr(env_cfg.task, "hand_init_orn_noise"):
+            orn_noise = list(env_cfg.task.hand_init_orn_noise)
+            if len(orn_noise) < 3:
+                raise ValueError("task.hand_init_orn_noise must have at least 3 elements [roll, pitch, yaw].")
+            tilt_noise_rad = float(np.deg2rad(args_cli.random_orn))
+            orn_noise[0] = tilt_noise_rad
+            orn_noise[1] = tilt_noise_rad
+            env_cfg.task.hand_init_orn_noise = orn_noise
+            print(
+                f"[INFO] Random EEF roll/pitch init enabled: +/- {args_cli.random_orn:.2f} deg; "
+                f"yaw noise remains +/- {np.rad2deg(orn_noise[2]):.2f} deg."
+            )
     _apply_factory_init_overrides(env_cfg)
 
     env_cfg.scene.clone_in_fabric = False
@@ -379,22 +443,35 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             pov_writer = imageio.get_writer(pov_video_path, fps=max(int(round(1.0 / base_env.step_dt)), 1))
             zed_writer = None
             both_writer = None
+            side_grid_writer = None
+        elif args_cli.video_src == "side_grid":
+            side_grid_video_path = os.path.join(video_dir, f"{args_cli.task.replace(':', '_')}_side_view_3x3.mp4")
+            print(f"[INFO] Recording 3x3 side-view grid video to: {side_grid_video_path}")
+            side_grid_writer = imageio.get_writer(
+                side_grid_video_path, fps=max(int(round(1.0 / base_env.step_dt)), 1)
+            )
+            pov_writer = None
+            zed_writer = None
+            both_writer = None
         elif args_cli.video_src == "both":
             both_video_path = os.path.join(video_dir, f"{args_cli.task.replace(':', '_')}_both.mp4")
             print(f"[INFO] Recording side-by-side side-view+wrist video to: {both_video_path}")
             both_writer = imageio.get_writer(both_video_path, fps=max(int(round(1.0 / base_env.step_dt)), 1))
             pov_writer = None
             zed_writer = None
+            side_grid_writer = None
         else:
             zed_video_path = os.path.join(video_dir, f"{args_cli.task.replace(':', '_')}_zed.mp4")
             print(f"[INFO] Recording ZED wrist video to: {zed_video_path}")
             zed_writer = imageio.get_writer(zed_video_path, fps=max(int(round(1.0 / base_env.step_dt)), 1))
             pov_writer = None
             both_writer = None
+            side_grid_writer = None
     else:
         pov_writer = None
         zed_writer = None
         both_writer = None
+        side_grid_writer = None
 
     device = torch.device(args_cli.device or env_cfg.sim.device)
     policy = OfflineDiffusionInferencePolicy(checkpoint_path, device)
@@ -422,6 +499,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if zed_writer is not None:
                 zed_batch = base_env._wrist_camera.data.output["rgb"]
                 zed_writer.append_data(_make_zed_grid(zed_batch, policy.image_crop_size))
+            if side_grid_writer is not None:
+                if getattr(base_env, "_side_view_camera", None) is None:
+                    raise RuntimeError("Side-view grid requested, but no side-view camera is configured on the environment.")
+                side_view_batch = base_env._side_view_camera.data.output["rgb"]
+                side_grid_writer.append_data(
+                    _make_rgb_grid(side_view_batch, rows=3, cols=3, crop_size=policy.image_crop_size, label="side-view")
+                )
             if both_writer is not None:
                 if getattr(base_env, "_side_view_camera", None) is None:
                     raise RuntimeError("Combined video requested, but no side-view camera is configured on the environment.")
@@ -434,21 +518,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if len(dones) > 0 and torch.all(dones).item():
                 completed_loops += 1
                 episode_success_rate = _get_episode_success_rate(base_env)
-                final_success_rate = extras.get("successes") if isinstance(extras, dict) else None
-                if final_success_rate is None:
-                    final_success_rate = _get_current_success_rate(base_env)
-
                 episode_text = (
                     f"episode success rate = {_to_float(episode_success_rate):.4f}"
                     if episode_success_rate is not None
                     else "episode success rate = unavailable"
                 )
-                final_text = (
-                    f"final-step success rate = {_to_float(final_success_rate):.4f}"
-                    if final_success_rate is not None
-                    else "final-step success rate = unavailable"
-                )
-                print(f"[INFO] Loop {completed_loops}: {episode_text}, {final_text}")
+                print(f"[INFO] Loop {completed_loops}: {episode_text}")
                 if episode_success_rate is not None:
                     loop_success_rates.append(episode_success_rate)
                 policy.reset()
@@ -473,6 +548,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         zed_writer.close()
     if both_writer is not None:
         both_writer.close()
+    if side_grid_writer is not None:
+        side_grid_writer.close()
 
     env.close()
 
