@@ -24,6 +24,12 @@ def _parse_args() -> argparse.Namespace:
         help="Replay RGB only and do not require tactile FT datasets. Uses both side-view and wrist RGB when available.",
     )
     parser.add_argument(
+        "--ft",
+        action="store_true",
+        default=False,
+        help="Replay wrist RGB with left/right FT wrench plots. Requires left_ft_wrench and right_ft_wrench datasets.",
+    )
+    parser.add_argument(
         "--demo",
         type=int,
         nargs="+",
@@ -66,6 +72,12 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=9,
         help="Moving-average window for FT wrench overlay. 1 disables smoothing.",
+    )
+    parser.add_argument(
+        "--allow_partial",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Treat a file with no done=True rows as one partial demo. Useful for fixed-duration bias logs.",
     )
     parser.add_argument(
         "--output_root",
@@ -228,6 +240,7 @@ def _make_ft_plot_renderer(
     right_ft_filtered: np.ndarray,
     axis_names: list[str],
     title: str,
+    episode_boundaries: list[int] | None = None,
 ) -> tuple[callable, callable]:
     """Create a renderer that returns an FT plot frame for each timestep."""
     num_steps = left_ft.shape[0]
@@ -268,6 +281,8 @@ def _make_ft_plot_renderer(
             ax.set_title(f"{prefix} {axis_names[axis_idx]}")
             ax.set_ylabel("force/torque")
             ax.grid(alpha=0.3)
+            for boundary in episode_boundaries or []:
+                ax.axvline(boundary - 0.5, color="0.25", linestyle="-", linewidth=1.1, alpha=0.55)
             cursor = ax.axvline(0, color="k", linestyle="--", linewidth=0.9, alpha=0.75)
             cursors.append(cursor)
             line_specs.append((left_raw_line, right_raw_line, left_filt_line, right_filt_line, axis_idx))
@@ -294,6 +309,8 @@ def _make_ft_plot_renderer(
 
 def main():
     args = _parse_args()
+    if args.ft:
+        args.vision = False
 
     h5_path = Path(args.h5)
     if not h5_path.exists():
@@ -328,7 +345,11 @@ def main():
         done = np.asarray(h5_file["done"][:], dtype=np.bool_)
         bounds = _episode_bounds(done)
         if not bounds:
-            raise ValueError("No complete demos found (no done=True rows).")
+            if args.allow_partial and done.shape[0] > 0:
+                bounds = [(0, done.shape[0] - 1)]
+                print("[INFO] No done=True rows found; treating the full file as one partial demo.")
+            else:
+                raise ValueError("No complete demos found (no done=True rows).")
         if demo_end > len(bounds):
             raise IndexError(
                 f"--demo={demo_start} {demo_end} is out of range. File has {len(bounds)} complete demos."
@@ -337,6 +358,7 @@ def main():
         selected_bounds = bounds[demo_start - 1 : demo_end]
         row_arrays = [np.arange(start, end + 1, dtype=np.int64) for start, end in selected_bounds]
         rows = np.concatenate(row_arrays, axis=0)
+        episode_boundaries = np.cumsum([row_array.shape[0] for row_array in row_arrays[:-1]]).astype(np.int64).tolist()
         start = int(selected_bounds[0][0])
         end = int(selected_bounds[-1][1])
 
@@ -417,6 +439,8 @@ def main():
             ax_force.set_title(f"Force {axis_names[force_idx]}")
             ax_force.grid(alpha=0.3)
             ax_force.set_ylabel("force/torque")
+            for boundary in episode_boundaries:
+                ax_force.axvline(boundary - 0.5, color="0.25", linestyle="-", linewidth=1.1, alpha=0.55)
 
             ax_torque = axes[row, 1]
             ax_torque.plot(x, left_ft[:, torque_idx], color="tab:blue", linewidth=1.3, alpha=0.45, label="left raw")
@@ -441,6 +465,8 @@ def main():
             )
             ax_torque.set_title(f"Torque {axis_names[torque_idx]}")
             ax_torque.grid(alpha=0.3)
+            for boundary in episode_boundaries:
+                ax_torque.axvline(boundary - 0.5, color="0.25", linestyle="-", linewidth=1.1, alpha=0.55)
 
         axes[2, 0].set_xlabel("step")
         axes[2, 1].set_xlabel("step")
@@ -458,6 +484,7 @@ def main():
             right_ft_filtered,
             axis_names,
             f"{h5_path.name} | demo {demo_label} | rows {start}-{end}",
+            episode_boundaries=episode_boundaries,
         )
         resized_for_sync = False
         with imageio.get_writer(str(sync_video_path), fps=max(fps, 1), macro_block_size=1) as writer:

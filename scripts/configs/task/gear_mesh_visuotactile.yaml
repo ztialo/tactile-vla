@@ -1,15 +1,17 @@
-name: gear_mesh_vision_wrist
-# NOT WORKING
+name: gear_mesh_vision_wrist_sideview_ft
 
-dataset_path: logs/vision_rollouts/gear_mesh_500expert_demos_5dg.hdf5
+dataset_path: logs/vision_rollouts/gear_mesh_stage1_200demo_yaw15_bothviews_scale0p8.h5
 
 shape_meta: &shape_meta
   obs:
     wrist:
-      shape: [3, 216, 216]
+      shape: [3, 240, 240]
+      type: rgb
+    side_view:
+      shape: [3, 240, 240]
       type: rgb
     state:
-      shape: [8]
+      shape: [20]
       type: low_dim
   action:
     shape: [6]
@@ -29,6 +31,6 @@ dataset:
   seed: 42
   max_train_episodes: null
   max_val_episodes: null
-  image_crop_size: 216
-  use_ft: false
+  image_crop_size: 240
+  use_ft: true
   rotation_rep: raw

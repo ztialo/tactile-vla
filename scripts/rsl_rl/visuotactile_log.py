@@ -34,6 +34,30 @@ parser.add_argument(
     help="Enable random EE roll/pitch initialization with +/- this many degrees for tasks that support it.",
 )
 parser.add_argument(
+    "--fixed_eef_init",
+    action="store_true",
+    default=False,
+    help="Disable random EEF position/orientation initialization noise.",
+)
+parser.add_argument(
+    "--fixed_asset_yaw_deg",
+    type=float,
+    default=None,
+    help="Override the fixed asset nominal yaw in degrees.",
+)
+parser.add_argument(
+    "--fixed_asset_yaw_range_deg",
+    type=float,
+    default=None,
+    help="Override the fixed asset yaw randomization range in degrees. Use 0 for fixed yaw.",
+)
+parser.add_argument(
+    "--fixed_asset_height",
+    action="store_true",
+    default=False,
+    help="Disable fixed-asset Z-position randomization while keeping XY position randomization unchanged.",
+)
+parser.add_argument(
     "--privileged_actor",
     action="store_true",
     default=False,
@@ -50,7 +74,10 @@ parser.add_argument(
     "--log_path",
     type=str,
     default=None,
-    help="Path to an HDF5 file for logging visuotactile rollout data. If omitted, logging is disabled.",
+    help=(
+        "Path to an HDF5 file for logging visuotactile rollout data. If only a filename is provided, "
+        "it is written under logs/vistac_rollouts. If omitted, logging is disabled."
+    ),
 )
 parser.add_argument(
     "--max_steps",
@@ -117,6 +144,12 @@ parser.add_argument(
     action="store_true",
     default=False,
     help="When stopping via max_steps/app close, flush in-progress (non-terminal) episode fragments to HDF5.",
+)
+parser.add_argument(
+    "--hide_held_asset",
+    action="store_true",
+    default=False,
+    help="Teleport the held asset far below each environment and keep it there. Useful for empty-gripper FT bias logs.",
 )
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -262,6 +295,13 @@ def _format_duration(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def _resolve_log_path(log_path: str) -> str:
+    """Place bare visuotactile log filenames under the VISTAC rollout root."""
+    if os.path.isabs(log_path) or os.path.dirname(log_path):
+        return log_path
+    return os.path.join("logs", "vistac_rollouts", log_path)
+
+
 def _center_crop(image: torch.Tensor, crop_height: int, crop_width: int) -> torch.Tensor:
     """Crop an NHWC image tensor to a centered window while excluding the bottom artifact row."""
     height, width = image.shape[-3], image.shape[-2]
@@ -305,6 +345,50 @@ def _resolve_ft_body_indices(base_env) -> tuple[object, int, int]:
     return robot, int(left_ids[0]), int(right_ids[0])
 
 
+def _hide_held_asset(base_env):
+    """Move the held asset out of the workspace and zero its velocity."""
+    held_asset = getattr(base_env, "_held_asset", None)
+    if held_asset is None:
+        return
+    held_state = held_asset.data.default_root_state.clone()
+    held_state[:, 0:3] = base_env.scene.env_origins
+    held_state[:, 2] -= 10.0
+    held_state[:, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=base_env.device, dtype=held_state.dtype)
+    held_state[:, 7:] = 0.0
+    held_asset.write_root_pose_to_sim(held_state[:, 0:7])
+    held_asset.write_root_velocity_to_sim(held_state[:, 7:])
+    held_asset.reset()
+
+
+def _apply_factory_init_overrides(env_cfg):
+    task_cfg = getattr(env_cfg, "task", None)
+    if task_cfg is None:
+        return
+
+    if args_cli.fixed_eef_init:
+        task_cfg.hand_init_pos_noise = [0.0, 0.0, 0.0]
+        task_cfg.hand_init_orn_noise = [0.0, 0.0, 0.0]
+        if hasattr(task_cfg, "randomize_hand_init_tilt"):
+            task_cfg.randomize_hand_init_tilt = False
+        print("[INFO] Fixed EEF init enabled: zeroed hand init position/orientation noise.")
+
+    if args_cli.fixed_asset_yaw_deg is not None:
+        task_cfg.fixed_asset_init_orn_deg = float(args_cli.fixed_asset_yaw_deg)
+        print(f"[INFO] Fixed asset nominal yaw set to {task_cfg.fixed_asset_init_orn_deg:.2f} deg.")
+
+    if args_cli.fixed_asset_yaw_range_deg is not None:
+        task_cfg.fixed_asset_init_orn_range_deg = float(args_cli.fixed_asset_yaw_range_deg)
+        print(f"[INFO] Fixed asset yaw range set to {task_cfg.fixed_asset_init_orn_range_deg:.2f} deg.")
+
+    if args_cli.fixed_asset_height and hasattr(task_cfg, "fixed_asset_init_pos_noise"):
+        pos_noise = list(task_cfg.fixed_asset_init_pos_noise)
+        if len(pos_noise) < 3:
+            raise ValueError("task.fixed_asset_init_pos_noise must have at least 3 elements [x, y, z].")
+        pos_noise[2] = 0.0
+        task_cfg.fixed_asset_init_pos_noise = pos_noise
+        print("[INFO] Fixed asset height enabled: zeroed fixed-asset Z-position randomization noise.")
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Play with RSL-RL agent."""
@@ -318,6 +402,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.random_orn is not None and hasattr(env_cfg, "task") and hasattr(env_cfg.task, "randomize_hand_init_tilt"):
         env_cfg.task.randomize_hand_init_tilt = True
         env_cfg.task.hand_init_tilt_noise_deg = args_cli.random_orn
+    _apply_factory_init_overrides(env_cfg)
     if args_cli.privileged_actor:
         agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
 
@@ -353,6 +438,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     base_env = env.unwrapped
     robot, left_ft_body_idx, right_ft_body_idx = _resolve_ft_body_indices(base_env)
+    if args_cli.hide_held_asset:
+        _hide_held_asset(base_env)
+        print("[INFO] Hidden held asset enabled: moved held asset below each environment.")
 
     if agent_cfg.class_name == "DistillationRunner":
         if args_cli.task is None:
@@ -452,8 +540,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         raise ValueError("--action_scale must be > 0.")
     last_actions = None
     if args_cli.log_path:
-        os.makedirs(os.path.dirname(os.path.abspath(args_cli.log_path)), exist_ok=True)
-        h5_file = h5py.File(args_cli.log_path, "w")
+        log_path = _resolve_log_path(args_cli.log_path)
+        os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
+        h5_file = h5py.File(log_path, "w")
         log_env_ids = _parse_env_ids(args_cli.log_env_ids, base_env.num_envs, base_env.device)
         timestep_in_episode = torch.zeros(base_env.num_envs, dtype=torch.int64, device=base_env.device)
         episode_id_in_env = torch.zeros(base_env.num_envs, dtype=torch.int64, device=base_env.device)
@@ -482,7 +571,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         h5_file.attrs["episode_layout"] = "contiguous_per_env_episode"
         h5_file.attrs["wrist_rgb_resolution"] = np.asarray([rgb_crop_width, rgb_crop_height], dtype=np.int64)
         h5_file.attrs["replay_center_crop"] = "216x216"
-        print(f"[INFO] Visuotactile rollout HDF5 log: {os.path.abspath(args_cli.log_path)}")
+        print(f"[INFO] Visuotactile rollout HDF5 log: {os.path.abspath(log_path)}")
         print(f"[INFO] Logging env ids: {h5_file.attrs['logged_env_ids'].tolist()}")
 
     # reset environment
@@ -521,6 +610,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 last_actions = actions
                 # env stepping
                 obs, _, dones, extras = env.step(actions)
+                if args_cli.hide_held_asset:
+                    _hide_held_asset(base_env)
                 # reset recurrent states for episodes that have terminated
                 policy_nn.reset(dones)
 
