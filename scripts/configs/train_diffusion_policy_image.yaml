@@ -1,13 +1,13 @@
 defaults:
   - _self_
-  - task: gear_mesh_vision_wrist
+  - task: gear_mesh_vision_wrist_sideview
 
 name: train_diffusion_policy_image
 _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
 
 task_name: ${task.name}
 shape_meta: ${task.shape_meta}
-exp_name: "default"
+exp_name: "baseline_dp_2view_scale0p8"
 
 horizon: 16
 n_obs_steps: 2
@@ -40,11 +40,11 @@ policy:
       _target_: diffusion_policy.model.vision.model_getter.get_resnet
       name: resnet18
       weights: null
-    resize_shape: [256, 256]
-    crop_shape: null
-    random_crop: False
+    resize_shape: null
+    crop_shape: [216, 216]
+    random_crop: True
     use_group_norm: True
-    share_rgb_model: True
+    share_rgb_model: False
     imagenet_norm: True
 
   horizon: ${horizon}
