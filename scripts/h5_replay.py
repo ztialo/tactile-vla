@@ -379,8 +379,10 @@ def main():
         right_ft = None
         axis_names = None
         if not args.vision:
-            left_ft = np.asarray(h5_file["left_ft_wrench"][rows], dtype=np.float32)
-            right_ft = np.asarray(h5_file["right_ft_wrench"][rows], dtype=np.float32)
+            # IsaacLab body_incoming_joint_wrench_b is the incoming joint wrench on the link.
+            # Negate it here to visualize the reaction wrench measured by the CoinFT/environment.
+            left_ft = -np.asarray(h5_file["left_ft_wrench"][rows], dtype=np.float32)
+            right_ft = -np.asarray(h5_file["right_ft_wrench"][rows], dtype=np.float32)
             axis_names = _get_wrench_axis_names(h5_file)
             left_ft_filtered = _moving_average_ft(left_ft, args.ft_ma_window)
             right_ft_filtered = _moving_average_ft(right_ft, args.ft_ma_window)
@@ -514,6 +516,7 @@ def main():
             print("[INFO] Sync video note: wrist camera center-cropped to square.")
         if args.sync_height is not None:
             print(f"[INFO] Sync video note: upscaled/downscaled panels to {args.sync_height}px height.")
+        print("[INFO] FT sign convention: plotted -left/right_ft_wrench as CoinFT reaction wrench.")
         print(f"[INFO] FT moving-average window: {args.ft_ma_window}")
         if resized_for_sync:
             print("[INFO] Sync video note: resized FT plot panel to match wrist frame height.")

@@ -274,13 +274,19 @@ def _center_crop_torch(images: torch.Tensor, crop_size: int | None) -> torch.Ten
 
 
 def _resolve_ft_body_indices(env) -> tuple[object, int, int]:
-    """Resolve the left/right FT body ids on the robot articulation."""
+    """Resolve fingertip link ids whose incoming fixed-joint wrench is used as FT."""
     robot = env.scene["robot"]
-    left_ids, _ = robot.find_bodies("fr3_left_ft")
-    right_ids, _ = robot.find_bodies("fr3_right_ft")
-    if len(left_ids) == 0 or len(right_ids) == 0:
-        raise ValueError("Could not resolve FT bodies 'fr3_left_ft' and 'fr3_right_ft' on scene['robot'].")
-    return robot, int(left_ids[0]), int(right_ids[0])
+    left_name = "fr3_left_ft"
+    right_name = "fr3_right_ft"
+    try:
+        left_id = robot.body_names.index(left_name)
+        right_id = robot.body_names.index(right_name)
+    except ValueError as exc:
+        raise ValueError(
+            f"Could not resolve fingertip FT bodies '{left_name}' and '{right_name}'. "
+            f"Available bodies: {robot.body_names}"
+        ) from exc
+    return robot, left_id, right_id
 
 
 class OfflineDiffusionInferencePolicy:

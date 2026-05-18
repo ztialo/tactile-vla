@@ -151,6 +151,12 @@ parser.add_argument(
     default=False,
     help="Teleport the held asset far below each environment and keep it there. Useful for empty-gripper FT bias logs.",
 )
+parser.add_argument(
+    "--hold_finger_position",
+    action="store_true",
+    default=False,
+    help="Keep finger joint targets fixed at their current positions instead of commanding gripper close/open.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -336,13 +342,19 @@ def _compute_teacher_policy_obs(base_env) -> torch.Tensor:
 
 
 def _resolve_ft_body_indices(base_env) -> tuple[object, int, int]:
-    """Resolve the left/right FT body ids on the robot articulation."""
+    """Resolve fingertip link ids whose incoming fixed-joint wrench is used as FT."""
     robot = base_env.scene["robot"]
-    left_ids, _ = robot.find_bodies("fr3_left_ft")
-    right_ids, _ = robot.find_bodies("fr3_right_ft")
-    if len(left_ids) == 0 or len(right_ids) == 0:
-        raise ValueError("Could not resolve FT bodies 'fr3_left_ft' and 'fr3_right_ft' on scene['robot'].")
-    return robot, int(left_ids[0]), int(right_ids[0])
+    left_name = "fr3_left_ft"
+    right_name = "fr3_right_ft"
+    try:
+        left_id = robot.body_names.index(left_name)
+        right_id = robot.body_names.index(right_name)
+    except ValueError as exc:
+        raise ValueError(
+            f"Could not resolve fingertip FT bodies '{left_name}' and '{right_name}'. "
+            f"Available bodies: {robot.body_names}"
+        ) from exc
+    return robot, left_id, right_id
 
 
 def _hide_held_asset(base_env):
@@ -358,6 +370,27 @@ def _hide_held_asset(base_env):
     held_asset.write_root_pose_to_sim(held_state[:, 0:7])
     held_asset.write_root_velocity_to_sim(held_state[:, 7:])
     held_asset.reset()
+
+
+def _install_hold_finger_position(base_env):
+    """Patch gripper control so finger targets stay at the current joint positions."""
+    held_finger_pos = base_env._robot.data.joint_pos[:, 7:9].clone()
+    original_generate_ctrl_signals = base_env.generate_ctrl_signals
+
+    def _generate_ctrl_signals_hold_fingers(
+        ctrl_target_fingertip_midpoint_pos,
+        ctrl_target_fingertip_midpoint_quat,
+        ctrl_target_gripper_dof_pos,
+    ):
+        del ctrl_target_gripper_dof_pos
+        return original_generate_ctrl_signals(
+            ctrl_target_fingertip_midpoint_pos=ctrl_target_fingertip_midpoint_pos,
+            ctrl_target_fingertip_midpoint_quat=ctrl_target_fingertip_midpoint_quat,
+            ctrl_target_gripper_dof_pos=held_finger_pos,
+        )
+
+    base_env.generate_ctrl_signals = _generate_ctrl_signals_hold_fingers
+    return held_finger_pos
 
 
 def _apply_factory_init_overrides(env_cfg):
@@ -441,6 +474,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.hide_held_asset:
         _hide_held_asset(base_env)
         print("[INFO] Hidden held asset enabled: moved held asset below each environment.")
+    if args_cli.hold_finger_position:
+        held_finger_pos = _install_hold_finger_position(base_env)
+        print(f"[INFO] Hold finger position enabled: target={held_finger_pos[0].detach().cpu().tolist()}.")
 
     if agent_cfg.class_name == "DistillationRunner":
         if args_cli.task is None:
@@ -565,8 +601,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         h5_file.attrs["successful_episodes_target"] = args_cli.successful_episodes_target
         h5_file.attrs["success_tail_seconds"] = args_cli.success_tail_seconds
         h5_file.attrs["pre_action_wait_seconds"] = args_cli.pre_action_wait_seconds
-        h5_file.attrs["left_ft_body_name"] = "fr3_left_ft"
-        h5_file.attrs["right_ft_body_name"] = "fr3_right_ft"
         h5_file.attrs["ft_wrench_order"] = "fx,fy,fz,tx,ty,tz"
         h5_file.attrs["episode_layout"] = "contiguous_per_env_episode"
         h5_file.attrs["wrist_rgb_resolution"] = np.asarray([rgb_crop_width, rgb_crop_height], dtype=np.int64)
