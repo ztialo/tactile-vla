@@ -140,6 +140,18 @@ parser.add_argument(
     help="Hold the robot still for this many seconds at the start of each episode before running the policy.",
 )
 parser.add_argument(
+    "--physics_hz",
+    type=float,
+    default=360.0,
+    help="Physics stepping frequency for visuotactile logging. Policy/images/state remain at --policy_hz.",
+)
+parser.add_argument(
+    "--policy_hz",
+    type=float,
+    default=15.0,
+    help="Policy, image, and state logging frequency. Must divide --physics_hz.",
+)
+parser.add_argument(
     "--flush_partial_episodes_on_exit",
     action="store_true",
     default=False,
@@ -422,6 +434,23 @@ def _apply_factory_init_overrides(env_cfg):
         print("[INFO] Fixed asset height enabled: zeroed fixed-asset Z-position randomization noise.")
 
 
+def _apply_multirate_timing(env_cfg):
+    physics_hz = float(args_cli.physics_hz)
+    policy_hz = float(args_cli.policy_hz)
+    if physics_hz <= 0.0 or policy_hz <= 0.0:
+        raise ValueError("--physics_hz and --policy_hz must be positive.")
+    decimation = physics_hz / policy_hz
+    decimation_int = int(round(decimation))
+    if abs(decimation - decimation_int) > 1.0e-6:
+        raise ValueError(f"--physics_hz must be divisible by --policy_hz, got {physics_hz} / {policy_hz}.")
+    env_cfg.sim.dt = 1.0 / physics_hz
+    env_cfg.decimation = decimation_int
+    print(
+        f"[INFO] Multirate timing: physics={physics_hz:.1f} Hz, "
+        f"policy/log={policy_hz:.1f} Hz, decimation={decimation_int}."
+    )
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Play with RSL-RL agent."""
@@ -436,6 +465,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.task.randomize_hand_init_tilt = True
         env_cfg.task.hand_init_tilt_noise_deg = args_cli.random_orn
     _apply_factory_init_overrides(env_cfg)
+    _apply_multirate_timing(env_cfg)
     if args_cli.privileged_actor:
         agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
 
@@ -602,8 +632,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         h5_file.attrs["success_tail_seconds"] = args_cli.success_tail_seconds
         h5_file.attrs["pre_action_wait_seconds"] = args_cli.pre_action_wait_seconds
         h5_file.attrs["ft_wrench_order"] = "fx,fy,fz,tx,ty,tz"
+        h5_file.attrs["physics_hz"] = args_cli.physics_hz
+        h5_file.attrs["policy_hz"] = args_cli.policy_hz
+        h5_file.attrs["ft_samples_per_policy_step"] = base_env.cfg.decimation
+        h5_file.attrs["ft_layout"] = "per_policy_step_substeps"
         h5_file.attrs["episode_layout"] = "contiguous_per_env_episode"
         h5_file.attrs["wrist_rgb_resolution"] = np.asarray([rgb_crop_width, rgb_crop_height], dtype=np.int64)
+        h5_file.attrs["side_view_rgb_resolution"] = np.asarray([rgb_crop_width, rgb_crop_height], dtype=np.int64)
         h5_file.attrs["replay_center_crop"] = "216x216"
         print(f"[INFO] Visuotactile rollout HDF5 log: {os.path.abspath(log_path)}")
         print(f"[INFO] Logging env ids: {h5_file.attrs['logged_env_ids'].tolist()}")
@@ -653,8 +688,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     dones_mask = dones.to(dtype=torch.bool)
                     timeout = _get_timeout_tensor(extras, dones_mask)
                     gripper_pos = torch.mean(base_env.joint_pos[:, 7:], dim=1, keepdim=True)
-                    left_ft_wrench = robot.data.body_incoming_joint_wrench_b[:, left_ft_body_idx]
-                    right_ft_wrench = robot.data.body_incoming_joint_wrench_b[:, right_ft_body_idx]
+                    left_ft_wrench = getattr(base_env, "left_ft_wrench_substeps", None)
+                    right_ft_wrench = getattr(base_env, "right_ft_wrench_substeps", None)
+                    if left_ft_wrench is None or right_ft_wrench is None:
+                        left_ft_wrench = robot.data.body_incoming_joint_wrench_b[:, left_ft_body_idx]
+                        right_ft_wrench = robot.data.body_incoming_joint_wrench_b[:, right_ft_body_idx]
                     env_id_batch = _tensor_to_numpy(log_env_ids, dtype=np.int64)
                     batch = {
                         "env_id": env_id_batch,
@@ -681,6 +719,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             wrist_rgb = wrist_rgb.to(torch.uint8)
                         wrist_rgb = _center_crop(wrist_rgb, rgb_crop_height, rgb_crop_width)
                         batch["wrist_rgb"] = _tensor_to_numpy(wrist_rgb, log_env_ids)
+                        if not hasattr(base_env, "_side_view_camera"):
+                            raise AttributeError(
+                                "The env has no _side_view_camera. Use a visuotactile task with side view or pass --no_log_images."
+                            )
+                        side_view_rgb = base_env._side_view_camera.data.output["rgb"][..., :3]
+                        if side_view_rgb.dtype.is_floating_point:
+                            side_view_rgb = torch.clamp(side_view_rgb * 255.0, 0.0, 255.0).to(torch.uint8)
+                        else:
+                            side_view_rgb = side_view_rgb.to(torch.uint8)
+                        side_view_rgb = _center_crop(side_view_rgb, rgb_crop_height, rgb_crop_width)
+                        batch["side_view_rgb"] = _tensor_to_numpy(side_view_rgb, log_env_ids)
                     if args_cli.log_success_only:
                         active_mask = ~suppress_after_success[log_env_ids].detach().cpu().numpy()
                         if np.any(active_mask):

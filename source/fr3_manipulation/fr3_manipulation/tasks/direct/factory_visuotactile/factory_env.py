@@ -215,6 +215,11 @@ class FactoryEnv(DirectRLEnv):
         self.left_finger_body_idx = self._get_body_index("panda_leftfinger", "fr3_leftfinger")
         self.right_finger_body_idx = self._get_body_index("panda_rightfinger", "fr3_rightfinger")
         self.fingertip_body_idx = self._get_body_index("panda_fingertip_centered", "fr3_hand_tcp", "fr3_hand")
+        self.left_ft_body_idx = self._get_body_index("fr3_left_ft")
+        self.right_ft_body_idx = self._get_body_index("fr3_right_ft")
+        self.left_ft_wrench_substeps = torch.zeros((self.num_envs, self.cfg.decimation, 6), device=self.device)
+        self.right_ft_wrench_substeps = torch.zeros((self.num_envs, self.cfg.decimation, 6), device=self.device)
+        self.ft_substep_idx = 0
 
         # Tensors for finite-differencing.
         self.last_update_timestamp = 0.0  # Note: This is for finite differencing body velocities.
@@ -246,6 +251,7 @@ class FactoryEnv(DirectRLEnv):
 
         self._robot = Articulation(self.cfg.robot)
         self._wrist_camera = TiledCamera(self.cfg.wrist_camera) if self.cfg.wrist_camera is not None else None
+        self._side_view_camera = TiledCamera(self.cfg.side_view_camera) if self.cfg.side_view_camera is not None else None
         self._fixed_asset = Articulation(self.cfg_task.fixed_asset)
         self._held_asset = Articulation(self.cfg_task.held_asset)
         if self.cfg_task.name == "gear_mesh":
@@ -260,6 +266,8 @@ class FactoryEnv(DirectRLEnv):
         self.scene.articulations["robot"] = self._robot
         if self._wrist_camera is not None:
             self.scene.sensors["wrist_camera"] = self._wrist_camera
+        if self._side_view_camera is not None:
+            self.scene.sensors["side_view_camera"] = self._side_view_camera
         self.scene.articulations["fixed_asset"] = self._fixed_asset
         self.scene.articulations["held_asset"] = self._held_asset
         if self.cfg_task.name == "gear_mesh":
@@ -379,7 +387,22 @@ class FactoryEnv(DirectRLEnv):
         if len(env_ids) > 0:
             self._reset_buffers(env_ids)
 
+        self.ft_substep_idx = 0
+        self.left_ft_wrench_substeps.zero_()
+        self.right_ft_wrench_substeps.zero_()
         self.actions = self.ema_factor * action.clone().to(self.device) + (1 - self.ema_factor) * self.actions
+
+    def _record_ft_substep(self):
+        """Record one physics-rate FT sample during the decimation loop."""
+        if self.ft_substep_idx >= self.left_ft_wrench_substeps.shape[1]:
+            return
+        self.left_ft_wrench_substeps[:, self.ft_substep_idx] = self._robot.data.body_incoming_joint_wrench_b[
+            :, self.left_ft_body_idx
+        ]
+        self.right_ft_wrench_substeps[:, self.ft_substep_idx] = self._robot.data.body_incoming_joint_wrench_b[
+            :, self.right_ft_body_idx
+        ]
+        self.ft_substep_idx += 1
 
     def close_gripper_in_place(self):
         """Keep gripper in current position as gripper closes."""
@@ -425,6 +448,7 @@ class FactoryEnv(DirectRLEnv):
         # Check if we need to re-compute velocities within the decimation loop.
         if self.last_update_timestamp < self._robot._data._sim_timestamp:
             self._compute_intermediate_values(dt=self.physics_dt)
+        self._record_ft_substep()
 
         # Interpret actions as target pos displacements and set pos target
         pos_actions = self.actions[:, 0:3] * self.pos_threshold

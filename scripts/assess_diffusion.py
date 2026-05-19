@@ -302,15 +302,27 @@ class OfflineDiffusionInferencePolicy:
         self.model = model.to(device)
         self.model.eval()
         self.image_crop_size = cfg.task.dataset.get("image_crop_size")
-        self.use_ft = bool(cfg.task.dataset.get("use_ft", False)) or args_cli.ft
+        self.sample_obs_cfg = cfg.shape_meta.get("sample", {}).get("obs", {}).get("sparse", {})
         self.n_obs_steps = int(cfg.get("n_obs_steps", cfg.task.dataset.n_obs_steps))
         self.rgb_keys = [
             key for key, attr in cfg.shape_meta.obs.items() if attr.get("type", "low_dim") == "rgb"
         ]
+        self.low_dim_keys = [
+            key for key, attr in cfg.shape_meta.obs.items() if attr.get("type", "low_dim") == "low_dim"
+        ]
+        self.wrench_keys = [key for key in self.low_dim_keys if "wrench" in key]
+        self.use_ft = bool(self.wrench_keys) or bool(cfg.task.dataset.get("use_ft", False)) or args_cli.ft
+        self.key_horizons = {
+            key: int(self.sample_obs_cfg.get(key, {}).get("horizon", self.n_obs_steps))
+            for key in [*self.rgb_keys, *self.low_dim_keys]
+        }
         if "wrist" not in self.rgb_keys:
             raise ValueError(f"Offline diffusion assessment requires a wrist RGB obs key, got {self.rgb_keys}.")
-        self._image_histories = None
-        self._state_history = None
+        if "state" not in self.low_dim_keys:
+            raise ValueError(f"Offline diffusion assessment requires a state low-dim obs key, got {self.low_dim_keys}.")
+        if args_cli.ft and not self.wrench_keys:
+            print("[WARN] --ft was passed, but checkpoint shape_meta has no separate wrench obs keys.")
+        self._obs_histories = None
         self._action_plan = None
         self._action_step = 0
         self._robot = None
@@ -318,8 +330,7 @@ class OfflineDiffusionInferencePolicy:
         self._right_ft_body_idx = None
 
     def reset(self):
-        self._image_histories = None
-        self._state_history = None
+        self._obs_histories = None
         self._action_plan = None
         self._action_step = 0
 
@@ -333,44 +344,50 @@ class OfflineDiffusionInferencePolicy:
             return
         self._robot, self._left_ft_body_idx, self._right_ft_body_idx = _resolve_ft_body_indices(env)
 
-    def _build_current_obs(self, env) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    def _build_current_obs(self, env) -> dict[str, torch.Tensor]:
         if env._wrist_camera is None:
             raise RuntimeError("Offline diffusion policy requires wrist camera data, but no wrist camera is configured.")
-        images = {"wrist": self._normalize_images(env._wrist_camera.data.output["rgb"][..., :3])}
+        obs = {"wrist": self._normalize_images(env._wrist_camera.data.output["rgb"][..., :3])}
         if "side_view" in self.rgb_keys:
             if getattr(env, "_side_view_camera", None) is None:
                 raise RuntimeError(
                     "Offline diffusion policy requires side_view image data, but no side-view camera is configured."
                 )
-            images["side_view"] = self._normalize_images(env._side_view_camera.data.output["rgb"][..., :3])
+            obs["side_view"] = self._normalize_images(env._side_view_camera.data.output["rgb"][..., :3])
         gripper_pos = torch.mean(env.joint_pos[:, 7:], dim=1, keepdim=True)
-        state_parts = [env.fingertip_midpoint_pos, env.fingertip_midpoint_quat, gripper_pos]
-        if self.use_ft:
+        obs["state"] = torch.cat((env.fingertip_midpoint_pos, env.fingertip_midpoint_quat, gripper_pos), dim=-1)
+        if self.wrench_keys:
+            self._maybe_init_ft(env)
+            obs["left_ft_wrench"] = self._robot.data.body_incoming_joint_wrench_b[:, self._left_ft_body_idx]
+            obs["right_ft_wrench"] = self._robot.data.body_incoming_joint_wrench_b[:, self._right_ft_body_idx]
+        elif args_cli.ft:
             self._maybe_init_ft(env)
             left_ft_wrench = self._robot.data.body_incoming_joint_wrench_b[:, self._left_ft_body_idx]
             right_ft_wrench = self._robot.data.body_incoming_joint_wrench_b[:, self._right_ft_body_idx]
-            state_parts.extend((left_ft_wrench, right_ft_wrench))
-        return images, torch.cat(state_parts, dim=-1)
+            obs["state"] = torch.cat((obs["state"], left_ft_wrench, right_ft_wrench), dim=-1)
+        return obs
+
+    def _init_history(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        return {
+            key: value.unsqueeze(1).repeat(1, self.key_horizons[key], *([1] * (value.ndim - 1)))
+            for key, value in obs.items()
+        }
+
+    def _update_history(self, obs: dict[str, torch.Tensor]):
+        for key, value in obs.items():
+            self._obs_histories[key] = torch.roll(self._obs_histories[key], shifts=-1, dims=1)
+            self._obs_histories[key][:, -1] = value
 
     @torch.inference_mode()
     def act(self, env) -> torch.Tensor:
-        images, state = self._build_current_obs(env)
-        if self._image_histories is None or self._state_history is None:
-            self._image_histories = {
-                key: value.unsqueeze(1).repeat(1, self.n_obs_steps, 1, 1, 1)
-                for key, value in images.items()
-            }
-            self._state_history = state.unsqueeze(1).repeat(1, self.n_obs_steps, 1)
+        obs = self._build_current_obs(env)
+        if self._obs_histories is None:
+            self._obs_histories = self._init_history(obs)
         else:
-            for key, value in images.items():
-                self._image_histories[key] = torch.roll(self._image_histories[key], shifts=-1, dims=1)
-                self._image_histories[key][:, -1] = value
-            self._state_history = torch.roll(self._state_history, shifts=-1, dims=1)
-            self._state_history[:, -1] = state
+            self._update_history(obs)
 
         if self._action_plan is None or self._action_step >= self._action_plan.shape[1]:
-            obs_dict = {key: self._image_histories[key] for key in self.rgb_keys}
-            obs_dict["state"] = self._state_history
+            obs_dict = {key: self._obs_histories[key] for key in [*self.rgb_keys, *self.low_dim_keys]}
             result = self.model.predict_action(obs_dict)
             self._action_plan = result["action"]
             self._action_step = 0

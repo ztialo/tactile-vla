@@ -208,6 +208,16 @@ def _moving_average_ft(values: np.ndarray, window: int) -> np.ndarray:
     return filtered
 
 
+def _flatten_multirate_ft(values: np.ndarray) -> tuple[np.ndarray, int]:
+    if values.ndim == 3:
+        return values.reshape(values.shape[0] * values.shape[1], values.shape[2]), int(values.shape[1])
+    return values, 1
+
+
+def _expand_boundaries_for_ft(episode_boundaries: list[int], samples_per_step: int) -> list[int]:
+    return [int(boundary) * samples_per_step for boundary in episode_boundaries]
+
+
 def _figure_to_rgb(fig: plt.Figure) -> np.ndarray:
     """Render a Matplotlib figure to an HWC RGB uint8 image."""
     fig.canvas.draw()
@@ -381,12 +391,17 @@ def main():
         if not args.vision:
             # IsaacLab body_incoming_joint_wrench_b is the incoming joint wrench on the link.
             # Negate it here to visualize the reaction wrench measured by the CoinFT/environment.
-            left_ft = -np.asarray(h5_file["left_ft_wrench"][rows], dtype=np.float32)
-            right_ft = -np.asarray(h5_file["right_ft_wrench"][rows], dtype=np.float32)
+            left_ft_raw = np.asarray(h5_file["left_ft_wrench"][rows], dtype=np.float32)
+            right_ft_raw = np.asarray(h5_file["right_ft_wrench"][rows], dtype=np.float32)
+            left_ft_flat, ft_samples_per_step = _flatten_multirate_ft(left_ft_raw)
+            right_ft_flat, _ = _flatten_multirate_ft(right_ft_raw)
+            left_ft = -left_ft_flat
+            right_ft = -right_ft_flat
+            ft_episode_boundaries = _expand_boundaries_for_ft(episode_boundaries, ft_samples_per_step)
             axis_names = _get_wrench_axis_names(h5_file)
             left_ft_filtered = _moving_average_ft(left_ft, args.ft_ma_window)
             right_ft_filtered = _moving_average_ft(right_ft, args.ft_ma_window)
-        x = np.arange(wrist_rgb.shape[0], dtype=np.int64)
+        x = np.arange(left_ft.shape[0] if not args.vision else wrist_rgb.shape[0], dtype=np.int64)
 
     wrote_raw_video = False
     if args.vision and args.res in ("raw", "both"):
@@ -441,7 +456,7 @@ def main():
             ax_force.set_title(f"Force {axis_names[force_idx]}")
             ax_force.grid(alpha=0.3)
             ax_force.set_ylabel("force/torque")
-            for boundary in episode_boundaries:
+            for boundary in ft_episode_boundaries:
                 ax_force.axvline(boundary - 0.5, color="0.25", linestyle="-", linewidth=1.1, alpha=0.55)
 
             ax_torque = axes[row, 1]
@@ -467,7 +482,7 @@ def main():
             )
             ax_torque.set_title(f"Torque {axis_names[torque_idx]}")
             ax_torque.grid(alpha=0.3)
-            for boundary in episode_boundaries:
+            for boundary in ft_episode_boundaries:
                 ax_torque.axvline(boundary - 0.5, color="0.25", linestyle="-", linewidth=1.1, alpha=0.55)
 
         axes[2, 0].set_xlabel("step")
@@ -486,12 +501,13 @@ def main():
             right_ft_filtered,
             axis_names,
             f"{h5_path.name} | demo {demo_label} | rows {start}-{end}",
-            episode_boundaries=episode_boundaries,
+            episode_boundaries=ft_episode_boundaries,
         )
         resized_for_sync = False
         with imageio.get_writer(str(sync_video_path), fps=max(fps, 1), macro_block_size=1) as writer:
             for frame_idx, wrist_frame in enumerate(wrist_rgb):
-                ft_frame = render_ft_frame(frame_idx)
+                ft_frame_idx = min((frame_idx + 1) * ft_samples_per_step - 1, left_ft.shape[0] - 1)
+                ft_frame = render_ft_frame(ft_frame_idx)
                 if args.sync_height is not None:
                     wrist_frame = _resize_to_height(wrist_frame, args.sync_height)
                     ft_frame = _resize_to_height(ft_frame, args.sync_height)
