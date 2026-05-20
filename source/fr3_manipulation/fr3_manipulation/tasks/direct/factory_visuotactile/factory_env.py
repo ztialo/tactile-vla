@@ -215,8 +215,8 @@ class FactoryEnv(DirectRLEnv):
         self.left_finger_body_idx = self._get_body_index("panda_leftfinger", "fr3_leftfinger")
         self.right_finger_body_idx = self._get_body_index("panda_rightfinger", "fr3_rightfinger")
         self.fingertip_body_idx = self._get_body_index("panda_fingertip_centered", "fr3_hand_tcp", "fr3_hand")
-        self.left_ft_body_idx = self._get_body_index("fr3_left_ft")
-        self.right_ft_body_idx = self._get_body_index("fr3_right_ft")
+        self.left_ft_body_idx = self._get_body_index("fr3_left_ft_pad", "fr3_left_ft")
+        self.right_ft_body_idx = self._get_body_index("fr3_right_ft_pad", "fr3_right_ft")
         self.left_ft_wrench_substeps = torch.zeros((self.num_envs, self.cfg.decimation, 6), device=self.device)
         self.right_ft_wrench_substeps = torch.zeros((self.num_envs, self.cfg.decimation, 6), device=self.device)
         self.ft_substep_idx = 0

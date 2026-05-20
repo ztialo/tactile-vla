@@ -197,6 +197,7 @@ import os
 import time
 import torch
 from tensordict import TensorDict
+import omni
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
@@ -221,6 +222,17 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import fr3_manipulation.tasks  # noqa: F401
 
 
+LEFT_FT_PRIM_PATH = "/World/fr3/fr3_left_ft_pad"
+RIGHT_FT_PRIM_PATH = "/World/fr3/fr3_right_ft_pad"
+FT_ATTR_CANDIDATES = (
+    "body_incoming_joint_wrench_b",
+    "state:force",
+    "state:linearForce",
+    "physxJoint:force",
+    "physxJoint:normalForce",
+)
+
+
 def _parse_env_ids(spec: str, num_envs: int, device: torch.device) -> torch.Tensor:
     """Parse a comma-separated env id list or 'all'."""
     if spec.lower() == "all":
@@ -241,6 +253,13 @@ def _tensor_to_numpy(value: torch.Tensor, env_ids: torch.Tensor | None = None, d
     if dtype is not None:
         array = array.astype(dtype)
     return array
+
+
+def _get_episode_success_rate(env) -> float | None:
+    """Return the ever-succeeded episode success rate tracked by the raw Factory env."""
+    if not hasattr(env, "ep_succeeded"):
+        return None
+    return float(torch.count_nonzero(env.ep_succeeded).float().item() / env.num_envs)
 
 
 def _append_h5_batch(h5_file: h5py.File, batch: dict[str, np.ndarray]):
@@ -353,17 +372,86 @@ def _compute_teacher_policy_obs(base_env) -> torch.Tensor:
     )
 
 
+def _extract_force_vector(value) -> np.ndarray | None:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        try:
+            arr = np.asarray([float(v) for v in value], dtype=np.float32).reshape(-1)
+        except Exception:
+            return None
+        if arr.size >= 6:
+            return arr[:6]
+        if arr.size >= 3:
+            return np.concatenate([arr[:3], np.zeros(3, dtype=np.float32)], axis=0)
+        return None
+    if hasattr(value, "x") and hasattr(value, "y") and hasattr(value, "z"):
+        try:
+            return np.asarray([float(value.x), float(value.y), float(value.z), 0.0, 0.0, 0.0], dtype=np.float32)
+        except Exception:
+            return None
+    for attr_name in ("force", "linear", "linear_force"):
+        nested = getattr(value, attr_name, None)
+        if nested is not None:
+            vec = _extract_force_vector(nested)
+            if vec is not None:
+                return vec
+    for getter_name in ("GetForce", "GetLinear"):
+        getter = getattr(value, getter_name, None)
+        if callable(getter):
+            try:
+                vec = _extract_force_vector(getter())
+            except Exception:
+                vec = None
+            if vec is not None:
+                return vec
+    return None
+
+
+def _read_ft_wrench_from_prim(prim_path: str) -> np.ndarray | None:
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        return None
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        return None
+    for attr_name in FT_ATTR_CANDIDATES:
+        try:
+            attr = prim.GetAttribute(attr_name)
+            if not attr or not attr.IsValid():
+                continue
+            vec = _extract_force_vector(attr.Get())
+            if vec is not None:
+                return vec
+        except Exception:
+            continue
+    return None
+
+
+def _read_ft_wrenches_from_prim_paths(num_envs: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor] | None:
+    left = _read_ft_wrench_from_prim(LEFT_FT_PRIM_PATH)
+    right = _read_ft_wrench_from_prim(RIGHT_FT_PRIM_PATH)
+    if left is None or right is None:
+        return None
+    left_tensor = torch.from_numpy(left).to(device=device, dtype=torch.float32).unsqueeze(0).repeat(num_envs, 1)
+    right_tensor = torch.from_numpy(right).to(device=device, dtype=torch.float32).unsqueeze(0).repeat(num_envs, 1)
+    return left_tensor, right_tensor
+
+
 def _resolve_ft_body_indices(base_env) -> tuple[object, int, int]:
     """Resolve fingertip link ids whose incoming fixed-joint wrench is used as FT."""
     robot = base_env.scene["robot"]
-    left_name = "fr3_left_ft"
-    right_name = "fr3_right_ft"
+    left_candidates = ("fr3_left_ft_pad", "fr3_left_ft")
+    right_candidates = ("fr3_right_ft_pad", "fr3_right_ft")
     try:
+        left_name = next(name for name in left_candidates if name in robot.body_names)
+        right_name = next(name for name in right_candidates if name in robot.body_names)
         left_id = robot.body_names.index(left_name)
         right_id = robot.body_names.index(right_name)
-    except ValueError as exc:
+    except StopIteration as exc:
         raise ValueError(
-            f"Could not resolve fingertip FT bodies '{left_name}' and '{right_name}'. "
+            "Could not resolve fingertip FT bodies from "
+            f"{left_candidates} and {right_candidates}. "
             f"Available bodies: {robot.body_names}"
         ) from exc
     return robot, left_id, right_id
@@ -473,8 +561,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
-    if args_cli.no_log_images and hasattr(env_cfg, "wrist_camera"):
-        env_cfg.wrist_camera = None
+    if args_cli.no_log_images:
+        if hasattr(env_cfg, "wrist_camera"):
+            env_cfg.wrist_camera = None
+        if hasattr(env_cfg, "side_view_camera"):
+            env_cfg.side_view_camera = None
     elif hasattr(env_cfg, "scene") and hasattr(env_cfg.scene, "clone_in_fabric"):
         env_cfg.scene.clone_in_fabric = False
 
@@ -636,6 +727,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         h5_file.attrs["policy_hz"] = args_cli.policy_hz
         h5_file.attrs["ft_samples_per_policy_step"] = base_env.cfg.decimation
         h5_file.attrs["ft_layout"] = "per_policy_step_substeps"
+        h5_file.attrs["ft_prim_paths"] = np.asarray([LEFT_FT_PRIM_PATH, RIGHT_FT_PRIM_PATH], dtype="S")
         h5_file.attrs["episode_layout"] = "contiguous_per_env_episode"
         h5_file.attrs["wrist_rgb_resolution"] = np.asarray([rgb_crop_width, rgb_crop_height], dtype=np.int64)
         h5_file.attrs["side_view_rgb_resolution"] = np.asarray([rgb_crop_width, rgb_crop_height], dtype=np.int64)
@@ -688,8 +780,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     dones_mask = dones.to(dtype=torch.bool)
                     timeout = _get_timeout_tensor(extras, dones_mask)
                     gripper_pos = torch.mean(base_env.joint_pos[:, 7:], dim=1, keepdim=True)
-                    left_ft_wrench = getattr(base_env, "left_ft_wrench_substeps", None)
-                    right_ft_wrench = getattr(base_env, "right_ft_wrench_substeps", None)
+                    ft_from_prim_paths = _read_ft_wrenches_from_prim_paths(base_env.num_envs, base_env.device)
+                    if ft_from_prim_paths is not None:
+                        left_ft_wrench, right_ft_wrench = ft_from_prim_paths
+                    else:
+                        left_ft_wrench = getattr(base_env, "left_ft_wrench_substeps", None)
+                        right_ft_wrench = getattr(base_env, "right_ft_wrench_substeps", None)
                     if left_ft_wrench is None or right_ft_wrench is None:
                         left_ft_wrench = robot.data.body_incoming_joint_wrench_b[:, left_ft_body_idx]
                         right_ft_wrench = robot.data.body_incoming_joint_wrench_b[:, right_ft_body_idx]
@@ -829,7 +925,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 ]
                 if args_cli.log_success_only:
                     status_parts.append(f"successful_episodes={total_successful_episodes_written}")
-                if "successes" in extras:
+                episode_success_rate = _get_episode_success_rate(base_env)
+                if episode_success_rate is not None:
+                    status_parts.append(f"episode_success={episode_success_rate:.4f}")
+                elif "successes" in extras:
                     success_value = extras["successes"]
                     if isinstance(success_value, torch.Tensor):
                         success_value = float(success_value.item())
