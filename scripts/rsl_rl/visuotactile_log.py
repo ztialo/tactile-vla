@@ -58,6 +58,12 @@ parser.add_argument(
     help="Disable fixed-asset Z-position randomization while keeping XY position randomization unchanged.",
 )
 parser.add_argument(
+    "--hand_init_height",
+    type=float,
+    default=None,
+    help="Override task.hand_init_pos[2] in meters while keeping the task's existing XY hand-init offsets.",
+)
+parser.add_argument(
     "--privileged_actor",
     action="store_true",
     default=False,
@@ -169,12 +175,29 @@ parser.add_argument(
     default=False,
     help="Keep finger joint targets fixed at their current positions instead of commanding gripper close/open.",
 )
+parser.add_argument(
+    "--ft_grasp_width_control",
+    action="store_true",
+    default=False,
+    help=(
+        "After the reset-time grasp fit, override gripper commands with a fixed per-finger width "
+        "derived from the held-asset diameter. Intended for FR3 fingertip-FT experiments."
+    ),
+)
+parser.add_argument(
+    "--ft_grasp_width_scale",
+    type=float,
+    default=0.9,
+    help="Scale factor for fixed-width FT grasp control: commanded_width = (asset_diameter / 2) * scale.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
+if args_cli.hold_finger_position and args_cli.ft_grasp_width_control:
+    raise ValueError("--hold_finger_position and --ft_grasp_width_control are mutually exclusive.")
 task_name_cli = args_cli.task or ""
 is_visuo_task = ("Visuomotor" in task_name_cli) or ("Visuotactile" in task_name_cli)
 # always enable cameras to record video or visuotactile rollouts
@@ -438,6 +461,19 @@ def _read_ft_wrenches_from_prim_paths(num_envs: int, device: torch.device) -> tu
     return left_tensor, right_tensor
 
 
+def _drop_startup_ft_substep(ft_wrench: torch.Tensor, timestep_in_episode: torch.Tensor) -> torch.Tensor:
+    """For episode-start rows, drop substep 0 by shifting substeps left and repeating the last sample."""
+    if ft_wrench is None or ft_wrench.ndim != 3 or ft_wrench.shape[1] < 2:
+        return ft_wrench
+    startup_mask = timestep_in_episode == 0
+    if not torch.any(startup_mask):
+        return ft_wrench
+    ft_wrench = ft_wrench.clone()
+    ft_wrench[startup_mask, :-1, :] = ft_wrench[startup_mask, 1:, :]
+    ft_wrench[startup_mask, -1, :] = ft_wrench[startup_mask, -2, :]
+    return ft_wrench
+
+
 def _resolve_ft_body_indices(base_env) -> tuple[object, int, int]:
     """Resolve fingertip link ids whose incoming fixed-joint wrench is used as FT."""
     robot = base_env.scene["robot"]
@@ -493,10 +529,46 @@ def _install_hold_finger_position(base_env):
     return held_finger_pos
 
 
+def _install_fixed_grasp_width_control(base_env, width_scale: float):
+    """Patch gripper control to command a fixed post-grasp width derived from asset diameter."""
+    asset_diameter = float(base_env.cfg_task.held_asset_cfg.diameter)
+    commanded_width = float(asset_diameter * 0.5 * width_scale)
+    commanded_width_tensor = torch.full(
+        (base_env.num_envs, 2),
+        commanded_width,
+        device=base_env.device,
+        dtype=base_env._robot.data.joint_pos.dtype,
+    )
+    original_generate_ctrl_signals = base_env.generate_ctrl_signals
+
+    def _generate_ctrl_signals_fixed_grasp_width(
+        ctrl_target_fingertip_midpoint_pos,
+        ctrl_target_fingertip_midpoint_quat,
+        ctrl_target_gripper_dof_pos,
+    ):
+        del ctrl_target_gripper_dof_pos
+        return original_generate_ctrl_signals(
+            ctrl_target_fingertip_midpoint_pos=ctrl_target_fingertip_midpoint_pos,
+            ctrl_target_fingertip_midpoint_quat=ctrl_target_fingertip_midpoint_quat,
+            ctrl_target_gripper_dof_pos=commanded_width_tensor,
+        )
+
+    base_env.generate_ctrl_signals = _generate_ctrl_signals_fixed_grasp_width
+    return commanded_width
+
+
 def _apply_factory_init_overrides(env_cfg):
     task_cfg = getattr(env_cfg, "task", None)
     if task_cfg is None:
         return
+
+    if args_cli.hand_init_height is not None and hasattr(task_cfg, "hand_init_pos"):
+        hand_init_pos = list(task_cfg.hand_init_pos)
+        if len(hand_init_pos) < 3:
+            raise ValueError("task.hand_init_pos must have at least 3 elements [x, y, z].")
+        hand_init_pos[2] = float(args_cli.hand_init_height)
+        task_cfg.hand_init_pos = hand_init_pos
+        print(f"[INFO] Hand-init height override set to {task_cfg.hand_init_pos[2]:.4f} m.")
 
     if args_cli.fixed_eef_init:
         task_cfg.hand_init_pos_noise = [0.0, 0.0, 0.0]
@@ -595,9 +667,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.hide_held_asset:
         _hide_held_asset(base_env)
         print("[INFO] Hidden held asset enabled: moved held asset below each environment.")
-    if args_cli.hold_finger_position:
-        held_finger_pos = _install_hold_finger_position(base_env)
-        print(f"[INFO] Hold finger position enabled: target={held_finger_pos[0].detach().cpu().tolist()}.")
 
     if agent_cfg.class_name == "DistillationRunner":
         if args_cli.task is None:
@@ -737,6 +806,27 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # reset environment
     obs = env.get_observations()
+    if args_cli.hold_finger_position:
+        held_finger_pos = _install_hold_finger_position(base_env)
+        print(
+            "[INFO] Hold finger position enabled after reset-time grasp: "
+            f"target={held_finger_pos[0].detach().cpu().tolist()}.",
+        )
+    if args_cli.ft_grasp_width_control:
+        body_names = tuple(getattr(base_env._robot, "body_names", []) or [])
+        ft_body_candidates = ("fr3_left_ft_pad", "fr3_right_ft_pad")
+        if not all(name in body_names for name in ft_body_candidates):
+            print(
+                "[WARN] FT grasp-width control requested, but not all fingertip FT pad bodies were found. "
+                f"Expected {ft_body_candidates}, available bodies: {body_names}",
+            )
+        commanded_width = _install_fixed_grasp_width_control(base_env, args_cli.ft_grasp_width_scale)
+        print(
+            "[INFO] Fixed FT grasp-width control enabled after reset-time grasp: "
+            f"per_finger_width={commanded_width:.6f} m "
+            f"(diameter={float(base_env.cfg_task.held_asset_cfg.diameter):.6f} m, "
+            f"scale={float(args_cli.ft_grasp_width_scale):.3f}).",
+        )
     timestep = 0
     try:
         # simulate environment
@@ -789,6 +879,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     if left_ft_wrench is None or right_ft_wrench is None:
                         left_ft_wrench = robot.data.body_incoming_joint_wrench_b[:, left_ft_body_idx]
                         right_ft_wrench = robot.data.body_incoming_joint_wrench_b[:, right_ft_body_idx]
+                    left_ft_wrench = _drop_startup_ft_substep(left_ft_wrench, timestep_in_episode)
+                    right_ft_wrench = _drop_startup_ft_substep(right_ft_wrench, timestep_in_episode)
                     env_id_batch = _tensor_to_numpy(log_env_ids, dtype=np.int64)
                     batch = {
                         "env_id": env_id_batch,

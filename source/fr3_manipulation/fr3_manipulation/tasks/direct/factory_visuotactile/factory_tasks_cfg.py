@@ -165,7 +165,7 @@ class PegInsert(FactoryTask):
             usd_path=held_asset_cfg.usd_path,
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=True,
+                disable_gravity=False,
                 max_depenetration_velocity=5.0,
                 linear_damping=0.0,
                 angular_damping=0.0,
@@ -323,7 +323,7 @@ class GearMesh(FactoryTask):
             usd_path=held_asset_cfg.usd_path,
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=True,
+                disable_gravity=False,
                 max_depenetration_velocity=5.0,
                 linear_damping=0.0,
                 angular_damping=0.0,
@@ -429,7 +429,7 @@ class NutThread(FactoryTask):
             usd_path=held_asset_cfg.usd_path,
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=True,
+                disable_gravity=False,
                 max_depenetration_velocity=5.0,
                 linear_damping=0.0,
                 angular_damping=0.0,
