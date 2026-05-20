@@ -70,7 +70,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ft_ma_window",
         type=int,
-        default=9,
+        default=16,
         help="Moving-average window for FT wrench overlay. 1 disables smoothing.",
     )
     parser.add_argument(

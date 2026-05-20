@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import dill
 import hydra
+import importlib
 import os
 import sys
 import time
@@ -83,12 +84,24 @@ parser.add_argument(
     help="Disable fixed-asset Z-position randomization while keeping XY position randomization unchanged.",
 )
 parser.add_argument(
+    "--fixed_held_asset_height",
+    action="store_true",
+    default=False,
+    help="Disable held-asset Z-position randomization while keeping XY held-asset randomization unchanged.",
+)
+parser.add_argument(
     "--ft",
     action="store_true",
     default=False,
     help="Append left/right 6D FT wrench readings to the low-dimensional state during inference.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument(
+    "--height_diff_log_interval",
+    type=int,
+    default=50,
+    help="Print held-base height difference vector every N policy steps. Use <= 0 to disable.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 args_cli.enable_cameras = True
@@ -144,6 +157,54 @@ def _get_episode_success_rate(env):
     return torch.count_nonzero(env.ep_succeeded).float() / env.num_envs
 
 
+def _get_height_diff_vector(env):
+    required_attrs = ("held_pos", "held_quat", "fixed_pos", "fixed_quat", "cfg_task")
+    if not all(hasattr(env, attr) for attr in required_attrs):
+        return None
+
+    try:
+        factory_utils = importlib.import_module(env.__class__.__module__.rsplit(".", 1)[0] + ".factory_utils")
+    except (ImportError, ValueError):
+        return None
+
+    held_base_pos, _ = factory_utils.get_held_base_pose(
+        env.held_pos,
+        env.held_quat,
+        env.cfg_task.name,
+        env.cfg_task.fixed_asset_cfg,
+        env.num_envs,
+        env.device,
+    )
+    target_held_base_pos, _ = factory_utils.get_target_held_base_pose(
+        env.fixed_pos,
+        env.fixed_quat,
+        env.cfg_task.name,
+        env.cfg_task.fixed_asset_cfg,
+        env.num_envs,
+        env.device,
+    )
+    return held_base_pos[:, 2] - target_held_base_pos[:, 2]
+
+
+def _print_height_diff_vector(env, step: int):
+    z_disp = _get_height_diff_vector(env)
+    if z_disp is None:
+        return
+    z_disp_np = z_disp.detach().cpu().numpy()
+    fixed_cfg = env.cfg_task.fixed_asset_cfg
+    if env.cfg_task.name in ("peg_insert", "gear_mesh"):
+        threshold = fixed_cfg.height * env.cfg_task.success_threshold
+    elif env.cfg_task.name == "nut_thread":
+        threshold = fixed_cfg.thread_pitch * env.cfg_task.success_threshold
+    else:
+        threshold = None
+    threshold_text = f", threshold={threshold:.6f} m" if threshold is not None else ""
+    print(
+        f"[INFO] Step {step}: height_diff_m held_base_z-target_z"
+        f"{threshold_text}: {np.array2string(z_disp_np, precision=6, separator=', ')}"
+    )
+
+
 def _apply_factory_init_overrides(env_cfg):
     task_cfg = getattr(env_cfg, "task", None)
     if task_cfg is None:
@@ -171,6 +232,14 @@ def _apply_factory_init_overrides(env_cfg):
         pos_noise[2] = 0.0
         task_cfg.fixed_asset_init_pos_noise = pos_noise
         print("[INFO] Fixed asset height enabled: zeroed fixed-asset Z-position randomization noise.")
+
+    if args_cli.fixed_held_asset_height and hasattr(task_cfg, "held_asset_pos_noise"):
+        pos_noise = list(task_cfg.held_asset_pos_noise)
+        if len(pos_noise) < 3:
+            raise ValueError("task.held_asset_pos_noise must have at least 3 elements [x, y, z].")
+        pos_noise[2] = 0.0
+        task_cfg.held_asset_pos_noise = pos_noise
+        print("[INFO] Fixed held-asset height enabled: zeroed held-asset Z-position randomization noise.")
 
 
 def _to_uint8_rgb(frame: torch.Tensor):
@@ -537,6 +606,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 both_writer.append_data(
                     _make_side_view_wrist_side_by_side(side_view_batch, wrist_batch, policy.image_crop_size)
                 )
+
+            if args_cli.height_diff_log_interval > 0 and (timestep + 1) % args_cli.height_diff_log_interval == 0:
+                _print_height_diff_vector(base_env, timestep + 1)
 
             if len(dones) > 0 and torch.all(dones).item():
                 completed_loops += 1
