@@ -88,12 +88,6 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
-parser.add_argument(
-    "--height_diff_log_interval",
-    type=int,
-    default=50,
-    help="Print held-base height difference vector every N policy steps. Use <= 0 to disable.",
-)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -212,55 +206,6 @@ def _get_episode_success_rate(env):
     if not hasattr(env, "ep_succeeded"):
         return None
     return torch.count_nonzero(env.ep_succeeded).float() / env.num_envs
-
-
-def _get_height_diff_vector(env):
-    """Return held-base z minus target z for every env, matching Factory success logic."""
-    required_attrs = ("held_pos", "held_quat", "fixed_pos", "fixed_quat", "cfg_task")
-    if not all(hasattr(env, attr) for attr in required_attrs):
-        return None
-
-    try:
-        factory_utils = importlib.import_module(env.__class__.__module__.rsplit(".", 1)[0] + ".factory_utils")
-    except (ImportError, ValueError):
-        return None
-
-    held_base_pos, _ = factory_utils.get_held_base_pose(
-        env.held_pos,
-        env.held_quat,
-        env.cfg_task.name,
-        env.cfg_task.fixed_asset_cfg,
-        env.num_envs,
-        env.device,
-    )
-    target_held_base_pos, _ = factory_utils.get_target_held_base_pose(
-        env.fixed_pos,
-        env.fixed_quat,
-        env.cfg_task.name,
-        env.cfg_task.fixed_asset_cfg,
-        env.num_envs,
-        env.device,
-    )
-    return held_base_pos[:, 2] - target_held_base_pos[:, 2]
-
-
-def _print_height_diff_vector(env, step: int):
-    z_disp = _get_height_diff_vector(env)
-    if z_disp is None:
-        return
-    z_disp_np = z_disp.detach().cpu().numpy()
-    fixed_cfg = env.cfg_task.fixed_asset_cfg
-    if env.cfg_task.name in ("peg_insert", "gear_mesh"):
-        threshold = fixed_cfg.height * env.cfg_task.success_threshold
-    elif env.cfg_task.name == "nut_thread":
-        threshold = fixed_cfg.thread_pitch * env.cfg_task.success_threshold
-    else:
-        threshold = None
-    threshold_text = f", threshold={threshold:.6f} m" if threshold is not None else ""
-    print(
-        f"[INFO] Step {step}: height_diff_m held_base_z-target_z"
-        f"{threshold_text}: {np.array2string(z_disp_np, precision=6, separator=', ')}"
-    )
 
 
 def _print_env0_eef_euler(env, label: str):
@@ -397,9 +342,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             obs, _, dones, extras = env.step(actions)
             if hasattr(policy_nn, "reset"):
                 policy_nn.reset(dones)
-
-            if args_cli.height_diff_log_interval > 0 and (timestep + 1) % args_cli.height_diff_log_interval == 0:
-                _print_height_diff_vector(base_env, timestep + 1)
 
             if len(dones) > 0 and torch.all(dones).item():
                 completed_loops += 1

@@ -69,6 +69,17 @@ FR3_FT_WC_CFG = ArticulationCfg(
                 effort_limit_sim=12,
                 velocity_limit_sim=149.5,
             ),
+            # "fr3_hand": ImplicitActuatorCfg(
+            #     joint_names_expr=["fr3_finger_joint[1-2]"],
+            #     effort_limit_sim=40.0,
+            #     velocity_limit_sim=0.04,
+            #     stiffness=7500.0,
+            #     damping=173.0,
+            #     friction=0.1,
+            #     armature=0.0,
+            # ),
+            
+            # softer stiffnesss for better contact
             "fr3_hand": ImplicitActuatorCfg(
                 joint_names_expr=["fr3_finger_joint[1-2]"],
                 effort_limit_sim=40.0,

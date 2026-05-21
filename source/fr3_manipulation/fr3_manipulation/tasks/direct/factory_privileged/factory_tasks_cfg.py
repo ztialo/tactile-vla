@@ -69,6 +69,7 @@ class FactoryTask:
     # Held Asset (applies to all tasks)
     held_asset_pos_noise: list = [0.0, 0.006, 0.003]  # noise level of the held asset in gripper
     held_asset_rot_init: float = -90.0
+    held_asset_grasp_z_offset: float = 0.0  # Additional +Z lift of the held asset inside the gripper frame.
 
     # Reward
     ee_success_yaw: float = 0.0  # nut_thread task only.
@@ -286,6 +287,7 @@ class GearMesh(FactoryTask):
     # Held Asset (applies to all tasks)
     held_asset_pos_noise: list = [0.003, 0.0, 0.003]  # noise level of the held asset in gripper
     held_asset_rot_init: float = -90.0
+    held_asset_grasp_z_offset: float = 0.007
 
     keypoint_coef_baseline: list = [5, 4]
     keypoint_coef_coarse: list = [50, 2]

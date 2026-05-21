@@ -123,8 +123,8 @@ class FactoryEnv(DirectRLEnv):
         self.left_finger_body_idx = self._get_body_index("fr3_leftfinger")
         self.right_finger_body_idx = self._get_body_index("fr3_rightfinger")
         self.fingertip_body_idx = self._get_body_index("fr3_hand_tcp", "fr3_hand")
-        self.left_ft_body_idx = self._get_body_index("fr3_left_ft")
-        self.right_ft_body_idx = self._get_body_index("fr3_right_ft")
+        self.left_ft_body_idx = self._get_body_index("fr3_left_ft_pad", "fr3_left_ft_base", "fr3_left_ft")
+        self.right_ft_body_idx = self._get_body_index("fr3_right_ft_pad", "fr3_right_ft_base", "fr3_right_ft")
 
         # Tensors for finite-differencing.
         self.last_update_timestamp = 0.0  # Note: This is for finite differencing body velocities.
@@ -318,10 +318,11 @@ class FactoryEnv(DirectRLEnv):
             roll=target_euler_xyz[:, 0], pitch=target_euler_xyz[:, 1], yaw=target_euler_xyz[:, 2]
         )
 
+        grasp_close_width = self.cfg_task.held_asset_cfg.diameter / 2.0 * 0.875
         self.generate_ctrl_signals(
             ctrl_target_fingertip_midpoint_pos=ctrl_target_fingertip_midpoint_pos,
             ctrl_target_fingertip_midpoint_quat=ctrl_target_fingertip_midpoint_quat,
-            ctrl_target_gripper_dof_pos=0.0,
+            ctrl_target_gripper_dof_pos=grasp_close_width,
         )
 
     def _apply_action(self):
@@ -370,10 +371,11 @@ class FactoryEnv(DirectRLEnv):
             roll=target_euler_xyz[:, 0], pitch=target_euler_xyz[:, 1], yaw=target_euler_xyz[:, 2]
         )
 
+        grasp_close_width = self.cfg_task.held_asset_cfg.diameter / 2.0 * 0.875
         self.generate_ctrl_signals(
             ctrl_target_fingertip_midpoint_pos=ctrl_target_fingertip_midpoint_pos,
             ctrl_target_fingertip_midpoint_quat=ctrl_target_fingertip_midpoint_quat,
-            ctrl_target_gripper_dof_pos=0.0,
+            ctrl_target_gripper_dof_pos=grasp_close_width,
         )
 
     def generate_ctrl_signals(
@@ -663,6 +665,7 @@ class FactoryEnv(DirectRLEnv):
             held_asset_relative_pos[:, 0] += gear_base_offset[0]
             held_asset_relative_pos[:, 2] += gear_base_offset[2]
             held_asset_relative_pos[:, 2] += self.cfg_task.held_asset_cfg.height / 2.0 * 1.1
+            held_asset_relative_pos[:, 2] += self.cfg_task.held_asset_grasp_z_offset
         elif self.cfg_task.name == "nut_thread":
             held_asset_relative_pos = factory_utils.get_held_base_pos_local(
                 self.cfg_task.name, self.cfg_task.fixed_asset_cfg, self.num_envs, self.device
@@ -900,8 +903,9 @@ class FactoryEnv(DirectRLEnv):
         self.step_sim_no_action()
 
         grasp_time = 0.0
+        grasp_close_width = self.cfg_task.held_asset_cfg.diameter / 2.0 * 0.875
         while grasp_time < 0.25:
-            self.ctrl_target_joint_pos[env_ids, 7:] = 0.0  # Close gripper.
+            self.ctrl_target_joint_pos[env_ids, 7:] = grasp_close_width  # Close around the asset without full closure.
             self.close_gripper_in_place()
             self.step_sim_no_action()
             grasp_time += self.sim.get_physics_dt()
