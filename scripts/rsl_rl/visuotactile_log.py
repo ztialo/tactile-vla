@@ -148,7 +148,7 @@ parser.add_argument(
 parser.add_argument(
     "--physics_hz",
     type=float,
-    default=360.0,
+    default=120.0,
     help="Physics stepping frequency for visuotactile logging. Policy/images/state remain at --policy_hz.",
 )
 parser.add_argument(
@@ -257,8 +257,8 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import fr3_manipulation.tasks  # noqa: F401
 
 
-LEFT_FT_PRIM_PATH = "/World/fr3/fr3_left_ft_base"
-RIGHT_FT_PRIM_PATH = "/World/fr3/fr3_right_ft_base"
+LEFT_FT_PRIM_PATH = "/World/fr3/fr3_left_ft_pad"
+RIGHT_FT_PRIM_PATH = "/World/fr3/fr3_right_ft_pad"
 FT_ATTR_CANDIDATES = (
     "body_incoming_joint_wrench_b",
     "state:force",
@@ -508,8 +508,8 @@ def _downsample_ft_wrench(ft_wrench: torch.Tensor, physics_hz: float, ft_log_hz:
 def _resolve_ft_body_indices(base_env) -> tuple[object, int, int]:
     """Resolve fingertip link ids whose incoming fixed-joint wrench is used as FT."""
     robot = base_env.scene["robot"]
-    left_candidates = ("fr3_left_ft_pad", "fr3_left_ft")
-    right_candidates = ("fr3_right_ft_pad", "fr3_right_ft")
+    left_candidates = ("fr3_left_ft_pad", "fr3_left_ft_base", "fr3_left_ft")
+    right_candidates = ("fr3_right_ft_pad", "fr3_right_ft_base", "fr3_right_ft")
     try:
         left_name = next(name for name in left_candidates if name in robot.body_names)
         right_name = next(name for name in right_candidates if name in robot.body_names)
@@ -791,6 +791,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     total_samples_written = 0
     total_episodes_finished = 0
     total_successful_episodes_written = 0
+    printed_ft_source_info = False
     if not (0.0 <= args_cli.action_smoothing_alpha <= 1.0):
         raise ValueError("--action_smoothing_alpha must be in [0, 1].")
     if args_cli.action_scale <= 0.0:
@@ -906,12 +907,36 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     ft_from_prim_paths = _read_ft_wrenches_from_prim_paths(base_env.num_envs, base_env.device)
                     if ft_from_prim_paths is not None:
                         left_ft_wrench, right_ft_wrench = ft_from_prim_paths
+                        if not printed_ft_source_info:
+                            print(
+                                "[INFO] FT logging source: prim paths "
+                                f"('{LEFT_FT_PRIM_PATH}', '{RIGHT_FT_PRIM_PATH}').",
+                            )
+                            printed_ft_source_info = True
                     else:
                         left_ft_wrench = getattr(base_env, "left_ft_wrench_substeps", None)
                         right_ft_wrench = getattr(base_env, "right_ft_wrench_substeps", None)
+                        if left_ft_wrench is not None and right_ft_wrench is not None and not printed_ft_source_info:
+                            body_names = getattr(robot, "body_names", [])
+                            left_body_name = body_names[left_ft_body_idx] if left_ft_body_idx < len(body_names) else left_ft_body_idx
+                            right_body_name = body_names[right_ft_body_idx] if right_ft_body_idx < len(body_names) else right_ft_body_idx
+                            print(
+                                "[INFO] FT logging source: env substep body_incoming_joint_wrench_b "
+                                f"(left={left_body_name}, right={right_body_name}).",
+                            )
+                            printed_ft_source_info = True
                     if left_ft_wrench is None or right_ft_wrench is None:
                         left_ft_wrench = robot.data.body_incoming_joint_wrench_b[:, left_ft_body_idx]
                         right_ft_wrench = robot.data.body_incoming_joint_wrench_b[:, right_ft_body_idx]
+                        if not printed_ft_source_info:
+                            body_names = getattr(robot, "body_names", [])
+                            left_body_name = body_names[left_ft_body_idx] if left_ft_body_idx < len(body_names) else left_ft_body_idx
+                            right_body_name = body_names[right_ft_body_idx] if right_ft_body_idx < len(body_names) else right_ft_body_idx
+                            print(
+                                "[INFO] FT logging source: robot.data.body_incoming_joint_wrench_b "
+                                f"(left={left_body_name}, right={right_body_name}).",
+                            )
+                            printed_ft_source_info = True
                     left_ft_wrench = _drop_startup_ft_substep(left_ft_wrench, timestep_in_episode)
                     right_ft_wrench = _drop_startup_ft_substep(right_ft_wrench, timestep_in_episode)
                     left_ft_wrench = _downsample_ft_wrench(left_ft_wrench, args_cli.physics_hz, ft_log_hz)
