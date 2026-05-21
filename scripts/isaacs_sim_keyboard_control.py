@@ -28,6 +28,7 @@ omni_appwindow = None
 Usd = None
 UsdGeom = None
 World = None
+SimulationContext = None
 SingleArticulation = None
 XFormPrim = None
 ArticulationAction = None
@@ -48,8 +49,8 @@ LIVE_FT_PLOT_AXES = ("fx", "fy", "fz")
 LIVE_FT_PLOT_AXIS = None  # Legacy single-axis fallback
 LIVE_FT_PLOT_UPDATE_HZ = 8.0
 LIVE_FT_PLOT_WINDOW_SECONDS = 20.0
-LIVE_FT_FORCE_Y_LIMIT = 20.0
-LIVE_FT_TORQUE_Y_LIMIT = 0.5
+LIVE_FT_FORCE_Y_LIMIT = 10.0
+LIVE_FT_TORQUE_Y_LIMIT = 0.2
 
 
 # Robot and target configuration.
@@ -146,8 +147,8 @@ GRIPPER_MAX_POS = 0.04
 GRIPPER_MAX_SPEED = 0.03  # finger joint position units per second
 KEYBOARD_GRIPPER_COARSE_STEP = 0.001
 KEYBOARD_GRIPPER_STEP = 0.0002
-LEFT_FT_JOINT_NAME_CANDIDATES = ("fr3_left_ft_pad", "fr3_left_ft", "fr3_gripper_left_ft")
-RIGHT_FT_JOINT_NAME_CANDIDATES = ("fr3_right_ft_pad", "fr3_right_ft", "fr3_gripper_right_ft")
+LEFT_FT_JOINT_NAME_CANDIDATES = ("fr3_left_ft_pad",)
+RIGHT_FT_JOINT_NAME_CANDIDATES = ("fr3_right_ft_pad",)
 LEFT_FT_JOINT_PRIM_PATH = "/Root/fr3_ft_wc/fr3/fr3_left_ft_pad"
 RIGHT_FT_JOINT_PRIM_PATH = "/Root/fr3_ft_wc/fr3/fr3_right_ft_pad"
 GRIPPER_CONTACT_FORCE_THRESHOLD = 2.0
@@ -162,7 +163,7 @@ FT_FORCE_ATTR_CANDIDATES = [
 
 
 def _ensure_isaac_imports() -> None:
-    global og, omni, carb, omni_appwindow, Usd, UsdGeom, World, SingleArticulation, XFormPrim, ArticulationAction, create_prim, is_prim_path_valid
+    global og, omni, carb, omni_appwindow, Usd, UsdGeom, World, SimulationContext, SingleArticulation, XFormPrim, ArticulationAction, create_prim, is_prim_path_valid
     if og is not None:
         return
     try:
@@ -170,6 +171,7 @@ def _ensure_isaac_imports() -> None:
         import omni as _omni
         import omni.appwindow as _omni_appwindow
         import omni.graph.core as _og
+        from omni.isaac.core import SimulationContext as _SimulationContext
         from pxr import Usd as _Usd
         from pxr import UsdGeom as _UsdGeom
         from isaacsim.core.api import World as _World
@@ -192,6 +194,7 @@ def _ensure_isaac_imports() -> None:
     Usd = _Usd
     UsdGeom = _UsdGeom
     World = _World
+    SimulationContext = _SimulationContext
     SingleArticulation = _SingleArticulation
     XFormPrim = _XFormPrim
     ArticulationAction = _ArticulationAction
@@ -695,6 +698,7 @@ class FrankaTeleopAttachRuntime:
         self._live_plot_fig = None
         self._live_plot_axes_by_name: dict[str, Any] = {}
         self._live_plot_lines: dict[str, tuple[Any, Any]] = {}
+        self._printed_physics_dt_info = False
 
     def _reset_cycle_state(self) -> None:
         self._reset_needed = True
@@ -779,6 +783,17 @@ class FrankaTeleopAttachRuntime:
         self._setup_live_ft_plot()
 
         print("[INFO] Attach runtime started.", flush=True)
+        try:
+            simulation_context = SimulationContext()
+            physics_dt = float(simulation_context.get_physics_dt())
+            if physics_dt > 0.0 and math.isfinite(physics_dt):
+                print(
+                    f"[INFO] Isaac Sim physics dt={physics_dt:.6f} s, "
+                    f"so FT logging runs at ~{(1.0 / physics_dt):.2f} Hz.",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(f"[WARN] Could not query SimulationContext physics dt: {exc}", flush=True)
         if not ENABLE_TARGET_VISUALIZATION:
             print("[INFO] Target visualization is disabled. Driving FR3 directly from teleop commands.", flush=True)
 
@@ -1950,6 +1965,16 @@ class FrankaTeleopAttachRuntime:
         timeline = omni.timeline.get_timeline_interface()
         if not timeline.is_playing():
             return
+
+        if not self._printed_physics_dt_info:
+            physics_dt = float(dt)
+            if physics_dt > 0.0 and math.isfinite(physics_dt):
+                print(
+                    f"[INFO] Physics callback dt={physics_dt:.6f} s, "
+                    f"so FT logging runs at ~{(1.0 / physics_dt):.2f} Hz.",
+                    flush=True,
+                )
+                self._printed_physics_dt_info = True
 
         if self._controller is None or self._fr3 is None:
             return

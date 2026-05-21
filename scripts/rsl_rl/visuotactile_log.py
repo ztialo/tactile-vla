@@ -158,6 +158,15 @@ parser.add_argument(
     help="Policy, image, and state logging frequency. Must divide --physics_hz.",
 )
 parser.add_argument(
+    "--ft_log_hz",
+    type=float,
+    default=None,
+    help=(
+        "Saved FT sampling frequency. Defaults to --physics_hz. Must divide --physics_hz "
+        "and be greater than or equal to --policy_hz."
+    ),
+)
+parser.add_argument(
     "--flush_partial_episodes_on_exit",
     action="store_true",
     default=False,
@@ -198,6 +207,9 @@ AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 if args_cli.hold_finger_position and args_cli.ft_grasp_width_control:
     raise ValueError("--hold_finger_position and --ft_grasp_width_control are mutually exclusive.")
+if args_cli.ft_log_hz is not None:
+    if args_cli.ft_log_hz < args_cli.policy_hz:
+        raise ValueError("--ft_log_hz must be greater than or equal to --policy_hz.")
 task_name_cli = args_cli.task or ""
 is_visuo_task = ("Visuomotor" in task_name_cli) or ("Visuotactile" in task_name_cli)
 # always enable cameras to record video or visuotactile rollouts
@@ -245,8 +257,8 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import fr3_manipulation.tasks  # noqa: F401
 
 
-LEFT_FT_PRIM_PATH = "/World/fr3/fr3_left_ft_pad"
-RIGHT_FT_PRIM_PATH = "/World/fr3/fr3_right_ft_pad"
+LEFT_FT_PRIM_PATH = "/World/fr3/fr3_left_ft_base"
+RIGHT_FT_PRIM_PATH = "/World/fr3/fr3_right_ft_base"
 FT_ATTR_CANDIDATES = (
     "body_incoming_joint_wrench_b",
     "state:force",
@@ -472,6 +484,25 @@ def _drop_startup_ft_substep(ft_wrench: torch.Tensor, timestep_in_episode: torch
     ft_wrench[startup_mask, :-1, :] = ft_wrench[startup_mask, 1:, :]
     ft_wrench[startup_mask, -1, :] = ft_wrench[startup_mask, -2, :]
     return ft_wrench
+
+
+def _downsample_ft_wrench(ft_wrench: torch.Tensor, physics_hz: float, ft_log_hz: float) -> torch.Tensor:
+    """Downsample per-physics-step FT samples while keeping simulator dt unchanged."""
+    if ft_wrench is None or ft_wrench.ndim != 3:
+        return ft_wrench
+    physics_hz = float(physics_hz)
+    ft_log_hz = float(ft_log_hz)
+    if ft_log_hz <= 0.0:
+        raise ValueError("--ft_log_hz must be positive.")
+    stride = physics_hz / ft_log_hz
+    stride_int = int(round(stride))
+    if abs(stride - stride_int) > 1.0e-6:
+        raise ValueError(f"--ft_log_hz must divide --physics_hz, got {ft_log_hz} vs {physics_hz}.")
+    if stride_int <= 1:
+        return ft_wrench
+    # Use the last sample in each stride-sized bin to keep a consistent causal sample timing.
+    start_idx = stride_int - 1
+    return ft_wrench[:, start_idx::stride_int, :]
 
 
 def _resolve_ft_body_indices(base_env) -> tuple[object, int, int]:
@@ -770,6 +801,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
         h5_file = h5py.File(log_path, "w")
         log_env_ids = _parse_env_ids(args_cli.log_env_ids, base_env.num_envs, base_env.device)
+        ft_log_hz = float(args_cli.ft_log_hz) if args_cli.ft_log_hz is not None else float(args_cli.physics_hz)
         timestep_in_episode = torch.zeros(base_env.num_envs, dtype=torch.int64, device=base_env.device)
         episode_id_in_env = torch.zeros(base_env.num_envs, dtype=torch.int64, device=base_env.device)
         episode_rows = {int(env_id): [] for env_id in log_env_ids.detach().cpu().tolist()}
@@ -794,7 +826,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         h5_file.attrs["ft_wrench_order"] = "fx,fy,fz,tx,ty,tz"
         h5_file.attrs["physics_hz"] = args_cli.physics_hz
         h5_file.attrs["policy_hz"] = args_cli.policy_hz
-        h5_file.attrs["ft_samples_per_policy_step"] = base_env.cfg.decimation
+        h5_file.attrs["ft_log_hz"] = ft_log_hz
+        h5_file.attrs["ft_samples_per_policy_step"] = int(round(ft_log_hz / float(args_cli.policy_hz)))
         h5_file.attrs["ft_layout"] = "per_policy_step_substeps"
         h5_file.attrs["ft_prim_paths"] = np.asarray([LEFT_FT_PRIM_PATH, RIGHT_FT_PRIM_PATH], dtype="S")
         h5_file.attrs["episode_layout"] = "contiguous_per_env_episode"
@@ -881,6 +914,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         right_ft_wrench = robot.data.body_incoming_joint_wrench_b[:, right_ft_body_idx]
                     left_ft_wrench = _drop_startup_ft_substep(left_ft_wrench, timestep_in_episode)
                     right_ft_wrench = _drop_startup_ft_substep(right_ft_wrench, timestep_in_episode)
+                    left_ft_wrench = _downsample_ft_wrench(left_ft_wrench, args_cli.physics_hz, ft_log_hz)
+                    right_ft_wrench = _downsample_ft_wrench(right_ft_wrench, args_cli.physics_hz, ft_log_hz)
                     env_id_batch = _tensor_to_numpy(log_env_ids, dtype=np.int64)
                     batch = {
                         "env_id": env_id_batch,
