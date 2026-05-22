@@ -89,7 +89,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lfilter_cutoff_hz",
         type=float,
-        default=10.0,
+        default=8.0,
         help="Butterworth low-pass cutoff frequency in Hz when --filter lfilter.",
     )
     parser.add_argument(
