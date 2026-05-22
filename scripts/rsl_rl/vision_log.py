@@ -400,6 +400,18 @@ def _apply_factory_init_overrides(env_cfg):
         print("[INFO] Fixed asset height enabled: zeroed fixed-asset Z-position randomization noise.")
 
 
+def _override_actor_target_xy_noise_for_eval(env_cfg):
+    """Use fixed actor-side XY target noise for student-style evaluation/logging."""
+    curriculum_cfg = getattr(env_cfg, "actor_target_perturb_curriculum", None)
+    if curriculum_cfg is None or args_cli.privileged_actor:
+        return
+    curriculum_cfg.enabled = True
+    curriculum_cfg.start_xy_noise_m = 0.01
+    curriculum_cfg.end_xy_noise_m = 0.01
+    curriculum_cfg.total_steps = 1
+    print("[INFO] Actor target XY noise override enabled: uniform reset noise in x,y within +/- 10.0 mm.")
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Play with RSL-RL agent."""
@@ -414,6 +426,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.task.randomize_hand_init_tilt = True
         env_cfg.task.hand_init_tilt_noise_deg = args_cli.random_orn
     _apply_factory_init_overrides(env_cfg)
+    _override_actor_target_xy_noise_for_eval(env_cfg)
     if args_cli.privileged_actor:
         agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
 

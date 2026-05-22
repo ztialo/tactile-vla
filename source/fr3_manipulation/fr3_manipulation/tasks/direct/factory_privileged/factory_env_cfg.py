@@ -190,7 +190,7 @@ class FactoryTaskGearMeshActorNoisyCfg(FactoryEnvCfg):
     task_name = "gear_mesh"
     task = GearMesh()
     actor_target_perturb_curriculum: ActorTargetPerturbCurriculumCfg = ActorTargetPerturbCurriculumCfg(
-        enabled=True, start_xy_noise_m=0.0, end_xy_noise_m=0.005, total_steps=0
+        enabled=True, start_xy_noise_m=0.0, end_xy_noise_m=0.01, total_steps=0
     )
     episode_length_s = 20.0
 

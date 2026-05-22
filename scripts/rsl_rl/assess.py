@@ -192,6 +192,18 @@ def _apply_factory_init_overrides(env_cfg):
         print("[INFO] Fixed held-asset height enabled: zeroed held-asset Z-position randomization noise.")
 
 
+def _override_actor_target_xy_noise_for_eval(env_cfg):
+    """Use fixed actor-side XY target noise for student-style evaluation/logging."""
+    curriculum_cfg = getattr(env_cfg, "actor_target_perturb_curriculum", None)
+    if curriculum_cfg is None or args_cli.privileged_actor:
+        return
+    curriculum_cfg.enabled = True
+    curriculum_cfg.start_xy_noise_m = 0.01
+    curriculum_cfg.end_xy_noise_m = 0.01
+    curriculum_cfg.total_steps = 1
+    print("[INFO] Actor target XY noise override enabled: uniform reset noise in x,y within +/- 10.0 mm.")
+
+
 def _get_current_success_rate(env):
     """Compute the current Factory success rate from the raw environment state."""
     if not hasattr(env, "_get_curr_successes"):
@@ -223,6 +235,23 @@ def _print_env0_eef_euler(env, label: str):
     )
 
 
+def _print_env0_target_pos(env, label: str):
+    """Print env_0 exact and noisy target observation positions when available."""
+    if not hasattr(env, "fixed_pos_obs_frame"):
+        return
+    exact_target = env.fixed_pos_obs_frame[0].detach().cpu().numpy()
+    noise = np.zeros_like(exact_target)
+    noisy_target = exact_target.copy()
+    if hasattr(env, "init_fixed_pos_obs_noise"):
+        noise = env.init_fixed_pos_obs_noise[0].detach().cpu().numpy()
+        noisy_target = noisy_target + noise
+    print(
+        f"[INFO] {label} env0 target pos exact={np.array2string(exact_target, precision=6, separator=', ')} "
+        f"noisy={np.array2string(noisy_target, precision=6, separator=', ')} "
+        f"noise={np.array2string(noise, precision=6, separator=', ')}"
+    )
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Assess with RSL-RL agent."""
@@ -237,6 +266,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.task.randomize_hand_init_tilt = True
         env_cfg.task.hand_init_tilt_noise_deg = args_cli.random_orn
     _apply_factory_init_overrides(env_cfg)
+    _override_actor_target_xy_noise_for_eval(env_cfg)
     if args_cli.privileged_actor:
         agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
 
@@ -330,6 +360,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # reset environment
     obs = env.get_observations()
     _print_env0_eef_euler(base_env, "Reset")
+    _print_env0_target_pos(base_env, "Reset")
     timestep = 0
     completed_loops = 0
     loop_success_rates = []
@@ -363,6 +394,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
                 print(f"[INFO] Loop {completed_loops}: {episode_text}, {final_text}")
                 _print_env0_eef_euler(base_env, f"Loop {completed_loops} end")
+                _print_env0_target_pos(base_env, f"Loop {completed_loops} end")
 
                 if args_cli.num_loops > 0 and completed_loops >= args_cli.num_loops:
                     break
