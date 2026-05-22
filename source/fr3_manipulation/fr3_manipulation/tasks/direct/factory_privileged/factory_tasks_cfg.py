@@ -75,6 +75,8 @@ class FactoryTask:
     ee_success_yaw: float = 0.0  # nut_thread task only.
     action_penalty_ee_scale: float = 0.0
     action_grad_penalty_scale: float = 0.0
+    yaw_action_penalty_scale: float = 0.0
+    yaw_action_penalty_height_threshold: float = 0.0
     # Reward function details can be found in Appendix B of https://arxiv.org/pdf/2408.04587.
     # Multi-scale keypoints are used to capture different phases of the task.
     # Each reward passes the keypoint distance, x, through a squashing function:
@@ -288,6 +290,8 @@ class GearMesh(FactoryTask):
     held_asset_pos_noise: list = [0.003, 0.0, 0.003]  # noise level of the held asset in gripper
     held_asset_rot_init: float = -90.0
     held_asset_grasp_z_offset: float = 0.007
+    yaw_action_penalty_scale: float = 0.1
+    yaw_action_penalty_height_threshold: float = 0.003
 
     keypoint_coef_baseline: list = [5, 4]
     keypoint_coef_coarse: list = [50, 2]

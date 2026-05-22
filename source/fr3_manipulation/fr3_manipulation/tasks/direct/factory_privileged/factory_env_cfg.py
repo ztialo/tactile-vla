@@ -95,6 +95,14 @@ class ActionSlowdownCurriculumCfg:
 
 
 @configclass
+class ActorTargetPerturbCurriculumCfg:
+    enabled: bool = False
+    start_xy_noise_m: float = 0.0
+    end_xy_noise_m: float = 0.0
+    total_steps: int = 0
+
+
+@configclass
 class FactoryEnvCfg(DirectRLEnvCfg):
     decimation = 8
     action_space = 6
@@ -122,6 +130,7 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     obs_rand: ObsRandCfg = ObsRandCfg()
     ctrl: CtrlCfg = CtrlCfg()
     action_slowdown_curriculum: ActionSlowdownCurriculumCfg = ActionSlowdownCurriculumCfg()
+    actor_target_perturb_curriculum: ActorTargetPerturbCurriculumCfg = ActorTargetPerturbCurriculumCfg()
 
     episode_length_s = 10.0  # Probably need to override.
     sim: SimulationCfg = SimulationCfg(
@@ -172,6 +181,16 @@ class FactoryTaskGearMeshSlowCfg(FactoryEnvCfg):
     ctrl: CtrlCfg = CtrlCfg()
     action_slowdown_curriculum: ActionSlowdownCurriculumCfg = ActionSlowdownCurriculumCfg(
         enabled=True, start_scale=1.0, end_scale=0.4, total_steps=0
+    )
+    episode_length_s = 20.0
+
+
+@configclass
+class FactoryTaskGearMeshActorNoisyCfg(FactoryEnvCfg):
+    task_name = "gear_mesh"
+    task = GearMesh()
+    actor_target_perturb_curriculum: ActorTargetPerturbCurriculumCfg = ActorTargetPerturbCurriculumCfg(
+        enabled=True, start_xy_noise_m=0.0, end_xy_noise_m=0.005, total_steps=0
     )
     episode_length_s = 20.0
 

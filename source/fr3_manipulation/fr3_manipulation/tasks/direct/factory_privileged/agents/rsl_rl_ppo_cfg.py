@@ -38,6 +38,7 @@ class FactoryPrivilegedPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     experiment_name = "factory_privileged"
     run_name = "teacher"
     obs_groups = {"policy": ["policy"], "critic": ["critic"]}
+    teacher_init_checkpoint: str = ""
 
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
@@ -55,3 +56,11 @@ class FactoryPrivilegedPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 class FactoryPrivilegedSlowPPORunnerCfg(FactoryPrivilegedPPORunnerCfg):
     experiment_name = "factory_privileged_slow"
     run_name = "teacher_0p2x"
+
+
+@configclass
+class FactoryPrivilegedActorNoisyPPORunnerCfg(FactoryPrivilegedPPORunnerCfg):
+    experiment_name = "factory_privileged_actor_noisy"
+    run_name = "student_xy_noise"
+    obs_groups = {"policy": ["policy_actor_noisy"], "critic": ["critic"]}
+    teacher_init_checkpoint: str = "logs/rsl_rl/factory_privileged/gear_mesh_stage_1_speedx1/model_199.pt"
