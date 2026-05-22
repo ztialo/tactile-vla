@@ -12,6 +12,7 @@ import isaacsim.core.utils.torch as torch_utils
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
+from isaaclab.sensors import TiledCamera
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.math import axis_angle_from_quat
@@ -173,6 +174,8 @@ class FactoryEnv(DirectRLEnv):
         )
 
         self._robot = Articulation(self.cfg.robot)
+        self._wrist_camera = TiledCamera(self.cfg.wrist_camera) if getattr(self.cfg, "wrist_camera", None) is not None else None
+        self._side_view_camera = TiledCamera(self.cfg.side_view_camera) if getattr(self.cfg, "side_view_camera", None) is not None else None
         self._fixed_asset = Articulation(self.cfg_task.fixed_asset)
         self._held_asset = Articulation(self.cfg_task.held_asset)
         if self.cfg_task.name == "gear_mesh":
@@ -185,6 +188,10 @@ class FactoryEnv(DirectRLEnv):
             self.scene.filter_collisions()
 
         self.scene.articulations["robot"] = self._robot
+        if self._wrist_camera is not None:
+            self.scene.sensors["wrist_camera"] = self._wrist_camera
+        if self._side_view_camera is not None:
+            self.scene.sensors["side_view_camera"] = self._side_view_camera
         self.scene.articulations["fixed_asset"] = self._fixed_asset
         self.scene.articulations["held_asset"] = self._held_asset
         if self.cfg_task.name == "gear_mesh":

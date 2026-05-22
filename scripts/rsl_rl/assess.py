@@ -32,6 +32,12 @@ parser.add_argument(
     help="Number of task episode-length loops to run before stopping. Use a value <= 0 to run until closed.",
 )
 parser.add_argument(
+    "--episode_length_s",
+    type=float,
+    default=None,
+    help="Override task episode length in seconds for assessment.",
+)
+parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
@@ -204,6 +210,14 @@ def _override_actor_target_xy_noise_for_eval(env_cfg):
     print("[INFO] Actor target XY noise override enabled: uniform reset noise in x,y within +/- 10.0 mm.")
 
 
+def _apply_episode_length_override(env_cfg):
+    """Override episode length for assessment when requested."""
+    if args_cli.episode_length_s is None:
+        return
+    env_cfg.episode_length_s = float(args_cli.episode_length_s)
+    print(f"[INFO] Episode length override set to {env_cfg.episode_length_s:.2f} s.")
+
+
 def _get_current_success_rate(env):
     """Compute the current Factory success rate from the raw environment state."""
     if not hasattr(env, "_get_curr_successes"):
@@ -236,10 +250,20 @@ def _print_env0_eef_euler(env, label: str):
 
 
 def _print_env0_target_pos(env, label: str):
-    """Print env_0 exact and noisy target observation positions when available."""
+    """Print env_0 target info and actor-side sampled target noise when available."""
     if not hasattr(env, "fixed_pos_obs_frame"):
         return
     exact_target = env.fixed_pos_obs_frame[0].detach().cpu().numpy()
+    if hasattr(env, "actor_held_xy_offset") and not args_cli.privileged_actor:
+        actor_xy_noise = env.actor_held_xy_offset[0].detach().cpu().numpy()
+        actor_noise_level_mm = float(getattr(env, "current_actor_xy_noise", 0.0)) * 1000.0
+        print(
+            f"[INFO] {label} env0 target pos exact={np.array2string(exact_target, precision=6, separator=', ')} "
+            f"actor_xy_offset={np.array2string(actor_xy_noise, precision=6, separator=', ')} "
+            f"actor_xy_noise_level_mm=+/- {actor_noise_level_mm:.1f}"
+        )
+        return
+
     noise = np.zeros_like(exact_target)
     noisy_target = exact_target.copy()
     if hasattr(env, "init_fixed_pos_obs_noise"):
@@ -267,6 +291,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.task.hand_init_tilt_noise_deg = args_cli.random_orn
     _apply_factory_init_overrides(env_cfg)
     _override_actor_target_xy_noise_for_eval(env_cfg)
+    _apply_episode_length_override(env_cfg)
     if args_cli.privileged_actor:
         agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
 
@@ -306,6 +331,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env = multi_agent_to_single_agent(env)
 
     base_env = env.unwrapped
+    if hasattr(base_env, "current_actor_xy_noise") and not args_cli.privileged_actor:
+        print(f"[INFO] Actor target XY noise level before sim start: +/- {float(base_env.current_actor_xy_noise) * 1000.0:.1f} mm.")
     max_assessment_steps = None
     if args_cli.num_loops > 0:
         steps_per_loop = max(base_env.max_episode_length - 1, 1)

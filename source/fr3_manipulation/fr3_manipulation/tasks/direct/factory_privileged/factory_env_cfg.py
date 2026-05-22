@@ -6,12 +6,16 @@
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import TiledCameraCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
 
 from ..robots.fr3_ft_wc_cfg import FR3_FT_WC_CFG
 from .factory_tasks_cfg import FactoryTask, GearMesh, NutThread, PegInsert
+
+CAMERA_HEIGHT = 320
+CAMERA_WIDTH = 400
 
 OBS_DIM_CFG = {
     "fingertip_pos": 3,
@@ -158,6 +162,8 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=128, env_spacing=2.0, clone_in_fabric=True)
 
     robot: ArticulationCfg = FR3_FT_WC_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    wrist_camera: TiledCameraCfg | None = None
+    side_view_camera: TiledCameraCfg | None = None
 
 
 @configclass
@@ -193,6 +199,27 @@ class FactoryTaskGearMeshActorNoisyCfg(FactoryEnvCfg):
         enabled=True, start_xy_noise_m=0.0, end_xy_noise_m=0.01, total_steps=0
     )
     episode_length_s = 20.0
+
+
+@configclass
+class FactoryTaskGearMeshActorNoisyCameraCfg(FactoryTaskGearMeshActorNoisyCfg):
+    wrist_camera: TiledCameraCfg = TiledCameraCfg(
+        prim_path="/World/envs/env_.*/Robot/fr3/fr3_link8/camera_mount_for_franka_hand/ZED_X/base_link/ZED_X/CameraLeft",
+        update_period=0.0,
+        height=CAMERA_HEIGHT,
+        width=CAMERA_WIDTH,
+        data_types=["rgb"],
+        spawn=None,
+    )
+
+    side_view_camera: TiledCameraCfg = TiledCameraCfg(
+        prim_path="/World/envs/env_.*/Robot/fr3/side_view_camera",
+        update_period=0.0,
+        height=CAMERA_HEIGHT,
+        width=CAMERA_WIDTH,
+        data_types=["rgb"],
+        spawn=None,
+    )
 
 
 @configclass

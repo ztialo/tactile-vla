@@ -289,7 +289,7 @@ class GearMesh(FactoryTask):
     # Held Asset (applies to all tasks)
     held_asset_pos_noise: list = [0.003, 0.0, 0.003]  # noise level of the held asset in gripper
     held_asset_rot_init: float = -90.0
-    held_asset_grasp_z_offset: float = 0.007
+    held_asset_grasp_z_offset: float = 0.008
     yaw_action_penalty_scale: float = 0.1
     yaw_action_penalty_height_threshold: float = 0.003
 

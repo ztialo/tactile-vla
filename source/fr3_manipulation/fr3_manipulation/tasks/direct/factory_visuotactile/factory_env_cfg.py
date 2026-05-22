@@ -20,6 +20,7 @@ IMAGE_EMBED_DIM = 256
 PROPRIO_DIM = 16  # joint_pos(7) + gripper_pos(1) + prev_action(8)
 PREV_ACTION_DIM = 8
 STUDENT_OBS_DIM = IMAGE_EMBED_DIM + PROPRIO_DIM
+PRIVILEGED_ACTOR_OBS_DIM = 51
 
 STATE_DIM_CFG = {
     "fingertip_pos": 3,
@@ -69,6 +70,14 @@ class CtrlCfg:
 
 
 @configclass
+class ActorTargetPerturbCurriculumCfg:
+    enabled: bool = False
+    start_xy_noise_m: float = 0.0
+    end_xy_noise_m: float = 0.0
+    total_steps: int = 0
+
+
+@configclass
 class FactoryEnvCfg(DirectRLEnvCfg):
     decimation = 8
     action_space = 6
@@ -96,6 +105,7 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     obs_rand: ObsRandCfg = ObsRandCfg()
     ctrl: CtrlCfg = CtrlCfg()
     offline_bc_checkpoint: str = ""
+    actor_target_perturb_curriculum: ActorTargetPerturbCurriculumCfg = ActorTargetPerturbCurriculumCfg()
 
     episode_length_s = 10.0  # Probably need to override.
     sim: SimulationCfg = SimulationCfg(
@@ -154,6 +164,17 @@ class FactoryTaskPegInsertCfg(FactoryEnvCfg):
 class FactoryTaskGearMeshCfg(FactoryEnvCfg):
     task_name = "gear_mesh"
     task = GearMesh()
+    episode_length_s = 20.0
+
+
+@configclass
+class FactoryTaskGearMeshActorNoisyCfg(FactoryEnvCfg):
+    observation_space = PRIVILEGED_ACTOR_OBS_DIM
+    task_name = "gear_mesh"
+    task = GearMesh()
+    actor_target_perturb_curriculum: ActorTargetPerturbCurriculumCfg = ActorTargetPerturbCurriculumCfg(
+        enabled=True, start_xy_noise_m=0.0, end_xy_noise_m=0.01, total_steps=0
+    )
     episode_length_s = 20.0
 
 

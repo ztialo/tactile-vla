@@ -53,3 +53,26 @@ class FactoryVisuomotorPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     )
 
     algorithm = RslRlPpoAlgorithmCompatCfg()
+
+
+@configclass
+class FactoryVisuotactileActorNoisyPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    num_steps_per_env = 128
+    max_iterations = 200
+    save_interval = 50
+    experiment_name = "factory_visuotactile_actor_noisy"
+    run_name = "student_xy_noise_camera"
+    output_root_dir: str = "logs/rsl_rl/factory_visuotactile_actor_noisy"
+    teacher_init_checkpoint: str = "logs/rsl_rl/factory_privileged/gear_mesh_stage_1_speedx1/model_199.pt"
+    obs_groups = {"policy": ["policy_actor_noisy"], "critic": ["critic"]}
+
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=1.0,
+        actor_obs_normalization=True,
+        critic_obs_normalization=True,
+        actor_hidden_dims=[512, 128, 64],
+        critic_hidden_dims=[512, 128, 64],
+        activation="elu",
+    )
+
+    algorithm = RslRlPpoAlgorithmCompatCfg()

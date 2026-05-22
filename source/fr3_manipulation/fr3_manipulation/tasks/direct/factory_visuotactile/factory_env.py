@@ -228,6 +228,7 @@ class FactoryEnv(DirectRLEnv):
             torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
         )
         self.prev_joint_pos = torch.zeros((self.num_envs, 7), device=self.device)
+        self.actor_held_xy_offset = torch.zeros((self.num_envs, 2), device=self.device)
 
         self.ep_succeeded = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
         self.ep_success_times = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
@@ -349,9 +350,18 @@ class FactoryEnv(DirectRLEnv):
         }
         return state_dict
 
+    def _get_noisy_actor_state_dict(self, state_dict):
+        """Actor-only privileged-style state with consistent XY target perturbation."""
+        noisy_state_dict = {key: value.clone() if torch.is_tensor(value) else value for key, value in state_dict.items()}
+        if self.cfg.actor_target_perturb_curriculum.enabled:
+            noisy_state_dict["held_pos"][:, 0:2] += self.actor_held_xy_offset
+            noisy_state_dict["held_pos_rel_fixed"][:, 0:2] += self.actor_held_xy_offset
+        return noisy_state_dict
+
     def _get_observations(self):
         """Get actor/critic inputs using asymmetric critic."""
         state_dict = self._get_factory_obs_state_dict()
+        noisy_state_dict = self._get_noisy_actor_state_dict(state_dict)
 
         gripper_pos = torch.mean(self.joint_pos[:, 7:], dim=1, keepdim=True)
         proprio = torch.cat((self.joint_pos[:, 0:7], gripper_pos, self.prev_action_obs), dim=-1)
@@ -363,6 +373,7 @@ class FactoryEnv(DirectRLEnv):
             image_embedding = torch.zeros((self.num_envs, IMAGE_EMBED_DIM), device=self.device)
         obs_tensors = torch.cat((image_embedding, proprio), dim=-1)
         state_tensors = factory_utils.collapse_obs_dict(state_dict, self.cfg.state_order + ["prev_actions"])
+        noisy_actor_state_tensors = factory_utils.collapse_obs_dict(noisy_state_dict, self.cfg.state_order + ["prev_actions"])
         noisy_fixed_pos = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
         teacher_policy_tensors = torch.cat(
             (
@@ -374,18 +385,43 @@ class FactoryEnv(DirectRLEnv):
             ),
             dim=-1,
         )
-        return {"policy": obs_tensors, "critic": state_tensors, "teacher_policy": teacher_policy_tensors}
+        return {
+            "policy": obs_tensors,
+            "critic": state_tensors,
+            "teacher_policy": teacher_policy_tensors,
+            "policy_actor_noisy": noisy_actor_state_tensors,
+        }
 
     def _reset_buffers(self, env_ids):
         """Reset buffers."""
         self.ep_succeeded[env_ids] = 0
         self.ep_success_times[env_ids] = 0
+        self.actor_held_xy_offset[env_ids] = 0.0
+
+    def _update_actor_target_perturb_curriculum(self, force: bool = False):
+        curriculum_cfg = self.cfg.actor_target_perturb_curriculum
+        if not curriculum_cfg.enabled:
+            self.current_actor_xy_noise = 0.0
+            return
+
+        total_steps = max(int(curriculum_cfg.total_steps), 1)
+        progress = min(max(float(self.common_step_counter) / float(total_steps), 0.0), 1.0)
+        current_noise = curriculum_cfg.start_xy_noise_m + progress * (
+            curriculum_cfg.end_xy_noise_m - curriculum_cfg.start_xy_noise_m
+        )
+        if (not force) and abs(current_noise - getattr(self, "current_actor_xy_noise", 0.0)) < 1.0e-8:
+            return
+        self.current_actor_xy_noise = current_noise
 
     def _pre_physics_step(self, action):
         """Apply policy actions with smoothing."""
         env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
+        self._update_actor_target_perturb_curriculum()
         if len(env_ids) > 0:
             self._reset_buffers(env_ids)
+            if self.cfg.actor_target_perturb_curriculum.enabled and self.current_actor_xy_noise > 0.0:
+                xy_noise = (2.0 * torch.rand((len(env_ids), 2), device=self.device) - 1.0) * self.current_actor_xy_noise
+                self.actor_held_xy_offset[env_ids] = xy_noise
 
         self.ft_substep_idx = 0
         self.left_ft_wrench_substeps.zero_()
