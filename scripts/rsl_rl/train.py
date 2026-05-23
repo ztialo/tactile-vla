@@ -364,15 +364,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # write git state to logs
     runner.add_git_repo_to_log(__file__)
     # load the checkpoint
-    if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
+    did_resume = agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation"
+    if did_resume:
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         # load previously trained model
         runner.load(resume_path)
-    if agent_cfg.algorithm.class_name == "Distillation" and getattr(agent_cfg, "student_init_checkpoint", ""):
+    if (
+        not agent_cfg.resume
+        and agent_cfg.algorithm.class_name == "Distillation"
+        and getattr(agent_cfg, "student_init_checkpoint", "")
+    ):
         _initialize_distillation_student_from_offline_bc(runner, agent_cfg.student_init_checkpoint)
-    elif agent_cfg.class_name == "OnPolicyRunner" and getattr(agent_cfg, "student_init_checkpoint", ""):
+    elif not agent_cfg.resume and agent_cfg.class_name == "OnPolicyRunner" and getattr(agent_cfg, "student_init_checkpoint", ""):
         _initialize_actor_from_offline_bc(runner, agent_cfg.student_init_checkpoint)
-    if agent_cfg.class_name == "OnPolicyRunner" and getattr(agent_cfg, "teacher_init_checkpoint", ""):
+    if not agent_cfg.resume and agent_cfg.class_name == "OnPolicyRunner" and getattr(agent_cfg, "teacher_init_checkpoint", ""):
         _initialize_actor_critic_from_teacher_checkpoint(runner, agent_cfg.teacher_init_checkpoint)
 
     # dump the configuration into log-directory
