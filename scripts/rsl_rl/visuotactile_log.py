@@ -142,7 +142,7 @@ parser.add_argument(
 parser.add_argument(
     "--pre_action_wait_seconds",
     type=float,
-    default=1.0,
+    default=0.0,
     help="Hold the robot still for this many seconds at the start of each episode before running the policy.",
 )
 parser.add_argument(
@@ -804,6 +804,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     total_samples_written = 0
     total_episodes_finished = 0
     total_successful_episodes_written = 0
+    completed_episode_success_rates: list[float] = []
     printed_ft_source_info = False
     if not (0.0 <= args_cli.action_smoothing_alpha <= 1.0):
         raise ValueError("--action_smoothing_alpha must be in [0, 1].")
@@ -1041,6 +1042,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             if len(ready_env_ids) > 0:
                                 h5_file.flush()
                     if torch.any(dones_mask):
+                        episode_success_rate_value = _get_episode_success_rate(base_env)
+                        final_success_rate_value = None
+                        if isinstance(extras, dict) and "successes" in extras:
+                            final_success_rate_value = extras["successes"]
+                            if isinstance(final_success_rate_value, torch.Tensor):
+                                final_success_rate_value = float(final_success_rate_value.item())
+                        if episode_success_rate_value is not None:
+                            completed_episode_success_rates.append(float(episode_success_rate_value))
+                        if episode_success_rate_value is not None or final_success_rate_value is not None:
+                            episode_text = (
+                                f"episode success rate = {float(episode_success_rate_value):.4f}"
+                                if episode_success_rate_value is not None
+                                else "episode success rate = unavailable"
+                            )
+                            final_text = (
+                                f"final-step success rate = {float(final_success_rate_value):.4f}"
+                                if final_success_rate_value is not None
+                                else "final-step success rate = unavailable"
+                            )
+                            print(f"[INFO] Episode end at step {timestep}: {episode_text}, {final_text}")
                         total_episodes_finished += int(torch.count_nonzero(dones_mask).item())
                         if last_actions is not None:
                             last_actions[dones_mask] = 0.0
@@ -1090,14 +1111,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 ]
                 if args_cli.log_success_only:
                     status_parts.append(f"successful_episodes={total_successful_episodes_written}")
-                episode_success_rate = _get_episode_success_rate(base_env)
-                if episode_success_rate is not None:
-                    status_parts.append(f"episode_success={episode_success_rate:.4f}")
-                elif "successes" in extras:
-                    success_value = extras["successes"]
-                    if isinstance(success_value, torch.Tensor):
-                        success_value = float(success_value.item())
-                    status_parts.append(f"success={success_value:.4f}")
                 if args_cli.max_steps > 0 and rate > 0:
                     remaining_steps = args_cli.max_steps - timestep
                     eta = remaining_steps / rate
@@ -1129,6 +1142,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     h5_file.flush()
                     print(f"[INFO] Flushed {partial_written} rows of partial episode data on exit.")
             h5_file.close()
+
+    if completed_episode_success_rates:
+        mean_episode_success_rate = sum(completed_episode_success_rates) / len(completed_episode_success_rates)
+        print(
+            "[INFO] Mean episode success rate over "
+            f"{len(completed_episode_success_rates)} completed episode(s): {mean_episode_success_rate:.4f}"
+        )
 
     # close the simulator
     env.close()

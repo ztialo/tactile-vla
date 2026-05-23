@@ -229,6 +229,7 @@ class FactoryEnv(DirectRLEnv):
         )
         self.prev_joint_pos = torch.zeros((self.num_envs, 7), device=self.device)
         self.actor_held_xy_offset = torch.zeros((self.num_envs, 2), device=self.device)
+        self.last_actor_held_xy_offset = torch.zeros((self.num_envs, 2), device=self.device)
 
         self.ep_succeeded = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
         self.ep_success_times = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
@@ -422,6 +423,7 @@ class FactoryEnv(DirectRLEnv):
             if self.cfg.actor_target_perturb_curriculum.enabled and self.current_actor_xy_noise > 0.0:
                 xy_noise = (2.0 * torch.rand((len(env_ids), 2), device=self.device) - 1.0) * self.current_actor_xy_noise
                 self.actor_held_xy_offset[env_ids] = xy_noise
+                self.last_actor_held_xy_offset[env_ids] = xy_noise
 
         self.ft_substep_idx = 0
         self.left_ft_wrench_substeps.zero_()

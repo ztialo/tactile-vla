@@ -255,7 +255,11 @@ def _print_env0_target_pos(env, label: str):
         return
     exact_target = env.fixed_pos_obs_frame[0].detach().cpu().numpy()
     if hasattr(env, "actor_held_xy_offset") and not args_cli.privileged_actor:
-        actor_xy_noise = env.actor_held_xy_offset[0].detach().cpu().numpy()
+        actor_xy_noise = (
+            env.last_actor_held_xy_offset[0].detach().cpu().numpy()
+            if hasattr(env, "last_actor_held_xy_offset")
+            else env.actor_held_xy_offset[0].detach().cpu().numpy()
+        )
         actor_noise_level_mm = float(getattr(env, "current_actor_xy_noise", 0.0)) * 1000.0
         print(
             f"[INFO] {label} env0 target pos exact={np.array2string(exact_target, precision=6, separator=', ')} "

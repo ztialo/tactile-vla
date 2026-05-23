@@ -549,6 +549,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     total_samples_written = 0
     total_episodes_finished = 0
     total_successful_episodes_written = 0
+    completed_episode_success_rates: list[float] = []
     if not (0.0 <= args_cli.action_smoothing_alpha <= 1.0):
         raise ValueError("--action_smoothing_alpha must be in [0, 1].")
     if args_cli.action_scale <= 0.0:
@@ -735,6 +736,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             if len(ready_env_ids) > 0:
                                 h5_file.flush()
                     if torch.any(dones_mask):
+                        episode_success_rate_value = _get_episode_success_rate(base_env)
+                        final_success_rate_value = None
+                        if "successes" in extras:
+                            final_success_rate_value = extras["successes"]
+                            if isinstance(final_success_rate_value, torch.Tensor):
+                                final_success_rate_value = float(final_success_rate_value.item())
+                        if episode_success_rate_value is not None:
+                            completed_episode_success_rates.append(float(episode_success_rate_value))
+                        if episode_success_rate_value is not None or final_success_rate_value is not None:
+                            episode_text = (
+                                f"episode success rate = {float(episode_success_rate_value):.4f}"
+                                if episode_success_rate_value is not None
+                                else "episode success rate = unavailable"
+                            )
+                            final_text = (
+                                f"final-step success rate = {float(final_success_rate_value):.4f}"
+                                if final_success_rate_value is not None
+                                else "final-step success rate = unavailable"
+                            )
+                            print(f"[INFO] Episode end at step {timestep}: {episode_text}, {final_text}")
                         total_episodes_finished += int(torch.count_nonzero(dones_mask).item())
                         if last_actions is not None:
                             last_actions[dones_mask] = 0.0
@@ -775,11 +796,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 ]
                 if args_cli.log_success_only:
                     status_parts.append(f"successful_episodes={total_successful_episodes_written}")
-                if "successes" in extras:
-                    success_value = extras["successes"]
-                    if isinstance(success_value, torch.Tensor):
-                        success_value = float(success_value.item())
-                    status_parts.append(f"success={success_value:.4f}")
                 if args_cli.max_steps > 0 and rate > 0:
                     remaining_steps = args_cli.max_steps - timestep
                     eta = remaining_steps / rate
@@ -801,6 +817,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     finally:
         if h5_file is not None:
             h5_file.close()
+
+    if completed_episode_success_rates:
+        mean_episode_success_rate = sum(completed_episode_success_rates) / len(completed_episode_success_rates)
+        print(
+            "[INFO] Mean episode success rate over "
+            f"{len(completed_episode_success_rates)} completed episode(s): {mean_episode_success_rate:.4f}"
+        )
 
     # close the simulator
     env.close()
