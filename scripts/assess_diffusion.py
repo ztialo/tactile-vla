@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import dill
 import hydra
-import importlib
 import os
 import sys
 import time
@@ -108,12 +107,6 @@ parser.add_argument(
     help="Append left/right 6D FT wrench readings to the low-dimensional state during inference.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
-parser.add_argument(
-    "--height_diff_log_interval",
-    type=int,
-    default=50,
-    help="Print held-base height difference vector every N policy steps. Use <= 0 to disable.",
-)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 args_cli.enable_cameras = True
@@ -167,35 +160,6 @@ def _get_episode_success_rate(env):
     if not hasattr(env, "ep_succeeded"):
         return None
     return torch.count_nonzero(env.ep_succeeded).float() / env.num_envs
-
-
-def _get_height_diff_vector(env):
-    required_attrs = ("held_pos", "held_quat", "fixed_pos", "fixed_quat", "cfg_task")
-    if not all(hasattr(env, attr) for attr in required_attrs):
-        return None
-
-    try:
-        factory_utils = importlib.import_module(env.__class__.__module__.rsplit(".", 1)[0] + ".factory_utils")
-    except (ImportError, ValueError):
-        return None
-
-    held_base_pos, _ = factory_utils.get_held_base_pose(
-        env.held_pos,
-        env.held_quat,
-        env.cfg_task.name,
-        env.cfg_task.fixed_asset_cfg,
-        env.num_envs,
-        env.device,
-    )
-    target_held_base_pos, _ = factory_utils.get_target_held_base_pose(
-        env.fixed_pos,
-        env.fixed_quat,
-        env.cfg_task.name,
-        env.cfg_task.fixed_asset_cfg,
-        env.num_envs,
-        env.device,
-    )
-    return held_base_pos[:, 2] - target_held_base_pos[:, 2]
 
 
 def _apply_factory_init_overrides(env_cfg):
