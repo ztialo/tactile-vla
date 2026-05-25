@@ -94,6 +94,12 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument(
+    "--action_scale",
+    type=float,
+    default=1.0,
+    help="Multiply policy actions by this factor before stepping the env. Values < 1 slow the policy down.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -140,6 +146,10 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import fr3_manipulation.tasks  # noqa: F401
+
+
+ACTOR_XY_EVAL_NOISE_M = 0.005
+ACTOR_XY_EVAL_NOISE_STD_M = ACTOR_XY_EVAL_NOISE_M / 3.0
 
 
 def _set_default_factory_video_view(env_cfg, task_name: str | None):
@@ -204,10 +214,37 @@ def _override_actor_target_xy_noise_for_eval(env_cfg):
     if curriculum_cfg is None or args_cli.privileged_actor:
         return
     curriculum_cfg.enabled = True
-    curriculum_cfg.start_xy_noise_m = 0.01
-    curriculum_cfg.end_xy_noise_m = 0.01
+    curriculum_cfg.start_xy_noise_m = ACTOR_XY_EVAL_NOISE_M
+    curriculum_cfg.end_xy_noise_m = ACTOR_XY_EVAL_NOISE_M
     curriculum_cfg.total_steps = 1
-    print("[INFO] Actor target XY noise override enabled: uniform reset noise in x,y within +/- 10.0 mm.")
+    print("[INFO] Actor target XY noise override enabled: clipped Gaussian reset noise in x,y within +/- 5.0 mm.")
+
+
+def _install_gaussian_actor_xy_noise(base_env):
+    """Replace uniform actor XY reset noise with clipped Gaussian noise for evaluation."""
+    if args_cli.privileged_actor or not hasattr(base_env, "_pre_physics_step"):
+        return
+    if not hasattr(base_env, "actor_held_xy_offset") or not hasattr(base_env, "cfg"):
+        return
+
+    original_pre_physics_step = base_env._pre_physics_step
+
+    def _pre_physics_step_gaussian_actor_noise(action):
+        env_ids = base_env.reset_buf.nonzero(as_tuple=False).squeeze(-1)
+        original_pre_physics_step(action)
+        if len(env_ids) == 0:
+            return
+        curriculum_cfg = getattr(base_env.cfg, "actor_target_perturb_curriculum", None)
+        if curriculum_cfg is None or not curriculum_cfg.enabled or base_env.current_actor_xy_noise <= 0.0:
+            return
+        xy_noise = torch.randn((len(env_ids), 2), device=base_env.device) * ACTOR_XY_EVAL_NOISE_STD_M
+        xy_noise = torch.clamp(xy_noise, -ACTOR_XY_EVAL_NOISE_M, ACTOR_XY_EVAL_NOISE_M)
+        base_env.actor_held_xy_offset[env_ids] = xy_noise
+        if hasattr(base_env, "last_actor_held_xy_offset"):
+            base_env.last_actor_held_xy_offset[env_ids] = xy_noise
+
+    base_env._pre_physics_step = _pre_physics_step_gaussian_actor_noise
+    print("[INFO] Actor target XY noise sampler override enabled: Gaussian with clipping at +/- 5.0 mm.")
 
 
 def _apply_episode_length_override(env_cfg):
@@ -335,6 +372,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env = multi_agent_to_single_agent(env)
 
     base_env = env.unwrapped
+    _install_gaussian_actor_xy_noise(base_env)
     if hasattr(base_env, "current_actor_xy_noise") and not args_cli.privileged_actor:
         print(f"[INFO] Actor target XY noise level before sim start: +/- {float(base_env.current_actor_xy_noise) * 1000.0:.1f} mm.")
     max_assessment_steps = None
@@ -390,6 +428,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # reset environment
     obs = env.get_observations()
+    if args_cli.action_scale <= 0.0:
+        raise ValueError("--action_scale must be > 0.")
     _print_env0_eef_euler(base_env, "Reset")
     _print_env0_target_pos(base_env, "Reset")
     timestep = 0
@@ -400,7 +440,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     while simulation_app.is_running():
         start_time = time.time()
         with torch.inference_mode():
-            actions = policy(obs)
+            actions = policy(obs) * args_cli.action_scale
             obs, _, dones, extras = env.step(actions)
             if hasattr(policy_nn, "reset"):
                 policy_nn.reset(dones)

@@ -259,6 +259,8 @@ import fr3_manipulation.tasks  # noqa: F401
 
 LEFT_FT_PRIM_PATH = "/World/fr3/fr3_left_ft_pad"
 RIGHT_FT_PRIM_PATH = "/World/fr3/fr3_right_ft_pad"
+ACTOR_XY_EVAL_NOISE_M = 0.005
+ACTOR_XY_EVAL_NOISE_STD_M = ACTOR_XY_EVAL_NOISE_M / 3.0
 FT_ATTR_CANDIDATES = (
     "body_incoming_joint_wrench_b",
     "state:force",
@@ -631,10 +633,37 @@ def _override_actor_target_xy_noise_for_eval(env_cfg):
     if curriculum_cfg is None or args_cli.privileged_actor:
         return
     curriculum_cfg.enabled = True
-    curriculum_cfg.start_xy_noise_m = 0.01
-    curriculum_cfg.end_xy_noise_m = 0.01
+    curriculum_cfg.start_xy_noise_m = ACTOR_XY_EVAL_NOISE_M
+    curriculum_cfg.end_xy_noise_m = ACTOR_XY_EVAL_NOISE_M
     curriculum_cfg.total_steps = 1
-    print("[INFO] Actor target XY noise override enabled: uniform reset noise in x,y within +/- 10.0 mm.")
+    print("[INFO] Actor target XY noise override enabled: clipped Gaussian reset noise in x,y within +/- 5.0 mm.")
+
+
+def _install_gaussian_actor_xy_noise(base_env):
+    """Replace actor XY reset noise with clipped Gaussian samples."""
+    if args_cli.privileged_actor or not hasattr(base_env, "_pre_physics_step"):
+        return
+    if not hasattr(base_env, "actor_held_xy_offset") or not hasattr(base_env, "cfg"):
+        return
+
+    original_pre_physics_step = base_env._pre_physics_step
+
+    def _pre_physics_step_gaussian_actor_noise(action):
+        env_ids = base_env.reset_buf.nonzero(as_tuple=False).squeeze(-1)
+        original_pre_physics_step(action)
+        if len(env_ids) == 0:
+            return
+        curriculum_cfg = getattr(base_env.cfg, "actor_target_perturb_curriculum", None)
+        if curriculum_cfg is None or not curriculum_cfg.enabled or base_env.current_actor_xy_noise <= 0.0:
+            return
+        xy_noise = torch.randn((len(env_ids), 2), device=base_env.device) * ACTOR_XY_EVAL_NOISE_STD_M
+        xy_noise = torch.clamp(xy_noise, -ACTOR_XY_EVAL_NOISE_M, ACTOR_XY_EVAL_NOISE_M)
+        base_env.actor_held_xy_offset[env_ids] = xy_noise
+        if hasattr(base_env, "last_actor_held_xy_offset"):
+            base_env.last_actor_held_xy_offset[env_ids] = xy_noise
+
+    base_env._pre_physics_step = _pre_physics_step_gaussian_actor_noise
+    print("[INFO] Actor target XY noise sampler override enabled: Gaussian with clipping at +/- 5.0 mm.")
 
 
 def _apply_multirate_timing(env_cfg):
@@ -707,6 +736,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     base_env = env.unwrapped
+    _install_gaussian_actor_xy_noise(base_env)
     robot, left_ft_body_idx, right_ft_body_idx = _resolve_ft_body_indices(base_env)
     if args_cli.hide_held_asset:
         _hide_held_asset(base_env)

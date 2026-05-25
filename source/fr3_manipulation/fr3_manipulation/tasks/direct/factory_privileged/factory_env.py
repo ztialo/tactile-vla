@@ -320,7 +320,10 @@ class FactoryEnv(DirectRLEnv):
         if len(env_ids) > 0:
             self._reset_buffers(env_ids)
             if self.cfg.actor_target_perturb_curriculum.enabled and self.current_actor_xy_noise > 0.0:
-                xy_noise = (2.0 * torch.rand((len(env_ids), 2), device=self.device) - 1.0) * self.current_actor_xy_noise
+                xy_noise = torch.randn((len(env_ids), 2), device=self.device) * (
+                    self.current_actor_xy_noise / 3.0
+                )
+                xy_noise = torch.clamp(xy_noise, -self.current_actor_xy_noise, self.current_actor_xy_noise)
                 self.actor_held_xy_offset[env_ids] = xy_noise
 
         self.actions = self.ema_factor * action.clone().to(self.device) + (1 - self.ema_factor) * self.actions
@@ -606,10 +609,15 @@ class FactoryEnv(DirectRLEnv):
         action_penalty_ee = torch.norm(self.actions, p=2)
         action_grad_penalty = torch.norm(self.actions - self.prev_actions, p=2, dim=-1)
         yaw_action_penalty = self.actions[:, 5] ** 2
+        z_action_penalty = torch.clamp(-self.actions[:, 2], min=0.0) ** 2
         yaw_gate = (
             z_disp > float(self.cfg_task.yaw_action_penalty_height_threshold)
         ).float()
         yaw_action_penalty = yaw_action_penalty * yaw_gate
+        z_gate = (
+            held_base_pos[:, 2] > float(self.cfg_task.z_action_penalty_height_threshold)
+        ).float()
+        z_action_penalty = z_action_penalty * z_gate
         curr_engaged = self._get_curr_successes(success_threshold=self.cfg_task.engage_threshold, check_rot=False)
 
         rew_dict = {
@@ -619,6 +627,7 @@ class FactoryEnv(DirectRLEnv):
             "action_penalty_ee": action_penalty_ee,
             "action_grad_penalty": action_grad_penalty,
             "yaw_action_penalty": yaw_action_penalty,
+            "z_action_penalty": z_action_penalty,
             "curr_engaged": curr_engaged.float(),
             "curr_success": curr_successes.float(),
         }
@@ -629,6 +638,7 @@ class FactoryEnv(DirectRLEnv):
             "action_penalty_ee": -self.cfg_task.action_penalty_ee_scale,
             "action_grad_penalty": -self.cfg_task.action_grad_penalty_scale,
             "yaw_action_penalty": -self.cfg_task.yaw_action_penalty_scale,
+            "z_action_penalty": -self.cfg_task.z_action_penalty_scale,
             "curr_engaged": 1.0,
             "curr_success": 1.0,
         }

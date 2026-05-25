@@ -1,6 +1,6 @@
 name: gear_mesh_vision_wrist_sideview
 
-dataset_path: logs/vision_rollouts/gear_mesh_stage1_200demo_yaw15_bothviews_scale0p8.h5
+dataset_path: logs/vistac_rollouts/gear_mesh_200success_vistac_timmft_teacher397_fixedeef_fixedheight_8cm.h5
 
 shape_meta: &shape_meta
   obs:

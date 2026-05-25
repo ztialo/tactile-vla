@@ -50,6 +50,18 @@ parser.add_argument(
     default=1,
     help="Number of episode-length loops to run before stopping. Use <= 0 to run until closed.",
 )
+parser.add_argument(
+    "--max_action_plan_steps",
+    type=int,
+    default=2,
+    help="Maximum number of predicted action steps to execute before querying the policy again. Defaults to full plan.",
+)
+parser.add_argument(
+    "--num_inference_steps",
+    type=int,
+    default=16,
+    help="Override the diffusion sampler step count stored in the checkpoint.",
+)
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment.")
@@ -184,25 +196,6 @@ def _get_height_diff_vector(env):
         env.device,
     )
     return held_base_pos[:, 2] - target_held_base_pos[:, 2]
-
-
-def _print_height_diff_vector(env, step: int):
-    z_disp = _get_height_diff_vector(env)
-    if z_disp is None:
-        return
-    z_disp_np = z_disp.detach().cpu().numpy()
-    fixed_cfg = env.cfg_task.fixed_asset_cfg
-    if env.cfg_task.name in ("peg_insert", "gear_mesh"):
-        threshold = fixed_cfg.height * env.cfg_task.success_threshold
-    elif env.cfg_task.name == "nut_thread":
-        threshold = fixed_cfg.thread_pitch * env.cfg_task.success_threshold
-    else:
-        threshold = None
-    threshold_text = f", threshold={threshold:.6f} m" if threshold is not None else ""
-    print(
-        f"[INFO] Step {step}: height_diff_m held_base_z-target_z"
-        f"{threshold_text}: {np.array2string(z_disp_np, precision=6, separator=', ')}"
-    )
 
 
 def _apply_factory_init_overrides(env_cfg):
@@ -392,6 +385,9 @@ class OfflineDiffusionInferencePolicy:
         self.device = device
         self.model = model.to(device)
         self.model.eval()
+        if args_cli.num_inference_steps is not None:
+            self.model.num_inference_steps = int(args_cli.num_inference_steps)
+            print(f"[INFO] Overriding diffusion num_inference_steps to {self.model.num_inference_steps}.")
         self.image_crop_size = cfg.task.dataset.get("image_crop_size")
         self.sample_obs_cfg = cfg.shape_meta.get("sample", {}).get("obs", {}).get("sparse", {})
         self.n_obs_steps = int(cfg.get("n_obs_steps", cfg.task.dataset.n_obs_steps))
@@ -430,6 +426,9 @@ class OfflineDiffusionInferencePolicy:
         self._obs_histories = None
         self._action_plan = None
         self._action_step = 0
+        self.max_action_plan_steps = (
+            int(args_cli.max_action_plan_steps) if args_cli.max_action_plan_steps is not None else None
+        )
         self._robot = None
         self._left_ft_body_idx = None
         self._right_ft_body_idx = None
@@ -500,7 +499,7 @@ class OfflineDiffusionInferencePolicy:
         else:
             self._update_history(obs)
 
-        if self._action_plan is None or self._action_step >= self._action_plan.shape[1]:
+        if self._action_plan is None or self._action_step >= self._current_plan_horizon():
             obs_dict = self._build_model_obs_dict()
             result = self.model.predict_action(obs_dict)
             self._action_plan = result["action"]
@@ -509,6 +508,14 @@ class OfflineDiffusionInferencePolicy:
         action = self._action_plan[:, self._action_step]
         self._action_step += 1
         return action
+
+    def _current_plan_horizon(self) -> int:
+        if self._action_plan is None:
+            return 0
+        plan_horizon = int(self._action_plan.shape[1])
+        if self.max_action_plan_steps is None:
+            return plan_horizon
+        return min(plan_horizon, self.max_action_plan_steps)
 
 
 @hydra_task_config(args_cli.task, None)
@@ -651,9 +658,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 both_writer.append_data(
                     _make_side_view_wrist_side_by_side(side_view_batch, wrist_batch, policy.image_crop_size)
                 )
-
-            if args_cli.height_diff_log_interval > 0 and (timestep + 1) % args_cli.height_diff_log_interval == 0:
-                _print_height_diff_vector(base_env, timestep + 1)
 
             if len(dones) > 0 and torch.all(dones).item():
                 completed_loops += 1

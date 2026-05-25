@@ -1,6 +1,6 @@
 name: gear_mesh_visuotactile_timm_ft
 
-dataset_path: logs/vistac_rollouts/gear_mesh_200success_vistac_actornoisy_yaw15_deg0_fixedeef_fixedheight_1xspeed.h5
+dataset_path: logs/vistac_rollouts/gear_mesh_200success_vistac_timmft_teacher397_fixedeef_fixedheight_8cm.h5
 
 sparse_obs_rgb_horizon: 2
 sparse_obs_rgb_down_sample_steps: 1

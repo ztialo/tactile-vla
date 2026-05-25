@@ -52,7 +52,7 @@ class FactoryTask:
 
     # Robot
     hand_init_pos: list = [0.0, 0.0, 0.015]  # Relative to fixed asset tip.
-    hand_init_pos_noise: list = [0.02, 0.02, 0.01]
+    hand_init_pos_noise: list = [0.0, 0.0, 0.0]
     hand_init_orn: list = [3.1416, 0, 2.356]
     hand_init_orn_noise: list = [0.0, 0.0, 1.57]
     randomize_hand_init_tilt: bool = False
@@ -77,6 +77,8 @@ class FactoryTask:
     action_grad_penalty_scale: float = 0.0
     yaw_action_penalty_scale: float = 0.0
     yaw_action_penalty_height_threshold: float = 0.0
+    z_action_penalty_scale: float = 0.0
+    z_action_penalty_height_threshold: float = 0.0
     # Reward function details can be found in Appendix B of https://arxiv.org/pdf/2408.04587.
     # Multi-scale keypoints are used to capture different phases of the task.
     # Each reward passes the keypoint distance, x, through a squashing function:
@@ -120,10 +122,10 @@ class PegInsert(FactoryTask):
     hand_init_pos: list = [0.0, 0.0, 0.080]  # Relative to fixed asset tip.
     hand_init_pos_noise: list = [0.02, 0.02, 0.01]
     hand_init_orn: list = [3.1416, 0.0, 0.0]
-    hand_init_orn_noise: list = [0.0, 0.0, 0.785]
+    hand_init_orn_noise: list = [0.0, 0.0, 0.0]
 
     # Fixed Asset (applies to all tasks)
-    fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.05]
+    fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.0]
     fixed_asset_init_orn_deg: float = 0.0
     fixed_asset_init_orn_range_deg: float = 360.0
 
