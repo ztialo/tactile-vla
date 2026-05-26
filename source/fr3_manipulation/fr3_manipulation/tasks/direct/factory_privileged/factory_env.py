@@ -12,6 +12,7 @@ import isaacsim.core.utils.torch as torch_utils
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.sensors import TiledCamera
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
@@ -201,6 +202,54 @@ class FactoryEnv(DirectRLEnv):
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
+
+        self._fixed_pos_obs_frame_marker = VisualizationMarkers(
+            VisualizationMarkersCfg(
+                prim_path="/World/Visuals/fixed_pos_obs_frame",
+                markers={
+                    "center": sim_utils.SphereCfg(
+                        radius=0.008,
+                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
+                    ),
+                },
+            )
+        )
+        self._pos_action_bounds_marker = VisualizationMarkers(
+            VisualizationMarkersCfg(
+                prim_path="/World/Visuals/pos_action_bounds",
+                markers={
+                    "corner": sim_utils.SphereCfg(
+                        radius=0.005,
+                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 1.0, 0.0)),
+                    ),
+                },
+            )
+        )
+
+    def _update_debug_markers(self):
+        """Visualize env-0 task reference point and action-bounds box."""
+        if getattr(self, "_fixed_pos_obs_frame_marker", None) is None or getattr(
+            self, "_pos_action_bounds_marker", None
+        ) is None:
+            return
+        center = self.fixed_pos_obs_frame[0:1]
+        bounds = self.pos_action_bounds[0]
+        signs = torch.tensor(
+            [
+                [-1.0, -1.0, -1.0],
+                [-1.0, -1.0, 1.0],
+                [-1.0, 1.0, -1.0],
+                [-1.0, 1.0, 1.0],
+                [1.0, -1.0, -1.0],
+                [1.0, -1.0, 1.0],
+                [1.0, 1.0, -1.0],
+                [1.0, 1.0, 1.0],
+            ],
+            device=self.device,
+        )
+        corners = center + signs * bounds.unsqueeze(0)
+        self._fixed_pos_obs_frame_marker.visualize(translations=center)
+        self._pos_action_bounds_marker.visualize(translations=corners)
 
     def _compute_intermediate_values(self, dt):
         """Get values computed from raw tensors. This includes adding noise."""
@@ -829,6 +878,7 @@ class FactoryEnv(DirectRLEnv):
             fixed_tip_pos_local,
         )
         self.fixed_pos_obs_frame[:] = fixed_tip_pos
+        self._update_debug_markers()
 
         # (2) Move gripper to randomizes location above fixed asset. Keep trying until IK succeeds.
         # (a) get position vector to target

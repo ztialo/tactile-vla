@@ -89,6 +89,8 @@ def main():
     env_cfg = parse_env_cfg(
         args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs, use_fabric=not args_cli.disable_fabric
     )
+    if hasattr(env_cfg, "viewer") and hasattr(env_cfg.viewer, "eye"):
+        env_cfg.viewer.eye = (0.6, 0.6, 0.6)
     _apply_task_overrides(env_cfg)
     # create environment
     env = gym.make(args_cli.task, cfg=env_cfg)
