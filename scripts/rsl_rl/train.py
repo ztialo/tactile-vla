@@ -53,6 +53,12 @@ parser.add_argument(
     help="Disable fixed-asset Z-position randomization while keeping XY position randomization unchanged.",
 )
 parser.add_argument(
+    "--pre_action_wait_seconds",
+    type=float,
+    default=0.0,
+    help="Hold the robot still for this many seconds at the start of each episode before applying policy actions.",
+)
+parser.add_argument(
     "--privileged_actor",
     action="store_true",
     default=False,
@@ -267,6 +273,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _apply_factory_init_overrides(env_cfg)
     if args_cli.privileged_actor:
         agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
+    if hasattr(env_cfg, "pre_action_wait_seconds"):
+        env_cfg.pre_action_wait_seconds = float(args_cli.pre_action_wait_seconds)
     if hasattr(env_cfg, "action_slowdown_curriculum") and getattr(env_cfg.action_slowdown_curriculum, "enabled", False):
         env_cfg.action_slowdown_curriculum.total_steps = agent_cfg.max_iterations * agent_cfg.num_steps_per_env
     if hasattr(env_cfg, "actor_target_perturb_curriculum") and getattr(env_cfg.actor_target_perturb_curriculum, "enabled", False):

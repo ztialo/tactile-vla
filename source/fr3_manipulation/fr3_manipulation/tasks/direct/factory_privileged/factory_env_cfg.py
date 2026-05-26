@@ -133,6 +133,7 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     task: FactoryTask = FactoryTask()
     obs_rand: ObsRandCfg = ObsRandCfg()
     ctrl: CtrlCfg = CtrlCfg()
+    pre_action_wait_seconds: float = 0.0
     action_slowdown_curriculum: ActionSlowdownCurriculumCfg = ActionSlowdownCurriculumCfg()
     actor_target_perturb_curriculum: ActorTargetPerturbCurriculumCfg = ActorTargetPerturbCurriculumCfg()
 

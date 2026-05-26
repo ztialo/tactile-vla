@@ -36,6 +36,7 @@ class FactoryEnv(DirectRLEnv):
         super().__init__(cfg, render_mode, **kwargs)
 
         factory_utils.set_body_inertias(self._robot, self.scene.num_envs)
+        self.pre_action_wait_steps = max(int(round(float(self.cfg.pre_action_wait_seconds) / float(self.step_dt))), 0)
         self._init_tensors()
         self._set_default_dynamics_parameters()
 
@@ -376,6 +377,11 @@ class FactoryEnv(DirectRLEnv):
                 self.actor_held_xy_offset[env_ids] = xy_noise
 
         self.actions = self.ema_factor * action.clone().to(self.device) + (1 - self.ema_factor) * self.actions
+        if self.pre_action_wait_steps > 0:
+            hold_mask = self.episode_length_buf < self.pre_action_wait_steps
+            if torch.any(hold_mask):
+                self.actions = self.actions.clone()
+                self.actions[hold_mask] = 0.0
 
     def close_gripper_in_place(self):
         """Keep gripper in current position as gripper closes."""

@@ -52,7 +52,7 @@ class ObsRandCfg:
 class CtrlCfg:
     ema_factor = 0.2
 
-    pos_action_bounds = [0.08, 0.08, 0.75]
+    pos_action_bounds = [0.1, 0.1, 0.75]
     rot_action_bounds = [1.0, 1.0, 1.0]
 
     pos_action_threshold = [0.02, 0.02, 0.02]
