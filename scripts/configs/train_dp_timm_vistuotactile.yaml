@@ -36,7 +36,7 @@ policy:
       pretrained: True
       frozen: False
       global_pool: ''
-      feature_aggregation: attention_pool_2d
+      feature_aggregation: null
       position_encoding: null
       downsample_ratio: 32
       transforms:
@@ -48,7 +48,7 @@ policy:
 
     force_encoder_cfg:
       model_name: causalconv
-      feature_dim: 256
+      feature_dim: 384
       frozen: False
       pretrained: False
       use_group_norm: False

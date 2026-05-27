@@ -24,10 +24,10 @@ shape_meta: &shape_meta
       shape: [8]
       type: low_dim
     left_ft_wrench:
-      shape: [6]
+      shape: [8, 6]
       type: low_dim
     right_ft_wrench:
-      shape: [6]
+      shape: [8, 6]
       type: low_dim
   action:
     shape: [6]
@@ -70,6 +70,5 @@ dataset:
   max_train_episodes: null
   max_val_episodes: null
   image_crop_size: 224
-  use_ft: false
-  ft_ma_window: ${task.ft_ma_window}
+  use_ft: true
   rotation_rep: raw
