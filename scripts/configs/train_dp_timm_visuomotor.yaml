@@ -66,15 +66,15 @@ ema:
   max_value: 0.9999
 
 dataloader:
-  batch_size: 64
-  num_workers: 3
+  batch_size: 5 # 64 for grad accum 1
+  num_workers: 4
   shuffle: True
   pin_memory: True
   persistent_workers: True
 
 val_dataloader:
-  batch_size: 64
-  num_workers: 3
+  batch_size: 5 # 64 for grad accum 1
+  num_workers: 4
   shuffle: False
   pin_memory: True
   persistent_workers: True
@@ -94,7 +94,7 @@ training:
   lr_scheduler: cosine
   lr_warmup_steps: 1000
   num_epochs: 150
-  gradient_accumulate_every: 1
+  gradient_accumulate_every: 13 # 1 for batch size 64
   use_ema: True
   freeze_encoder: False
   rollout_every: 10000
