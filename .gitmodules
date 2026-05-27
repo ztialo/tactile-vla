@@ -1,3 +1,6 @@
 [submodule "third_party/diffusion_policy"]
 	path = third_party/diffusion_policy
 	url = https://github.com/real-stanford/diffusion_policy
+[submodule "third_party/multimodal_representation"]
+	path = third_party/multimodal_representation
+	url = git@github.com:stanford-iprl-lab/multimodal_representation.git
