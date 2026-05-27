@@ -7,7 +7,7 @@ _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainD
 
 task_name: ${task.name}
 shape_meta: ${task.shape_meta}
-exp_name: "timm_resnet18_attentionpool_2view_ft"
+exp_name: "timm_vit_2view_ft"
 
 policy:
   _target_: diffusion_policy.policy.diffusion_unet_timm_isaaclab_policy.DiffusionUnetTimmIsaacLabPolicy
@@ -31,8 +31,9 @@ policy:
     reduce_pretrained_lr: True
 
     vision_encoder_cfg:
-      model_name: resnet18.a1_in1k
-      pretrained: False
+      # model_name: 'resnet34.a1_in1k'
+      model_name: 'vit_base_patch32_clip_224.openai'
+      pretrained: True
       frozen: False
       global_pool: ''
       feature_aggregation: attention_pool_2d
@@ -72,18 +73,18 @@ ema:
   max_value: 0.9999
 
 dataloader:
-  batch_size: 4
-  num_workers: 2
+  batch_size: 64 # 64
+  num_workers: 3
   shuffle: True
   pin_memory: True
-  persistent_workers: False
+  persistent_workers: True
 
 val_dataloader:
-  batch_size: 6
-  num_workers: 1
+  batch_size: 64 # 64
+  num_workers: 3
   shuffle: False
   pin_memory: True
-  persistent_workers: False
+  persistent_workers: True
 
 optimizer:
   _target_: torch.optim.AdamW
@@ -98,14 +99,14 @@ training:
   debug: False
   resume: False
   lr_scheduler: cosine
-  lr_warmup_steps: 500
-  num_epochs: 100
+  lr_warmup_steps: 1000
+  num_epochs: 150
   gradient_accumulate_every: 1
   use_ema: True
   freeze_encoder: False
   rollout_every: 10000
-  checkpoint_every: 1
-  val_every: 1
+  checkpoint_every: 5
+  val_every: 5
   sample_every: 5
   max_train_steps: null
   max_val_steps: null
@@ -125,7 +126,7 @@ checkpoint:
   topk:
     monitor_key: val_loss
     mode: min
-    k: 5
+    k: 15
     format_str: 'epoch={epoch:04d}-val_loss={val_loss:.4f}.ckpt'
   save_last_ckpt: False
   save_last_snapshot: False
