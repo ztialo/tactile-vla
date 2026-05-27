@@ -5,10 +5,10 @@ dataset_path: logs/vistac_rollouts/gear_mesh_200success_vistac_timmft_teacher397
 shape_meta: &shape_meta
   obs:
     wrist:
-      shape: [3, 240, 240]
+      shape: [3, 224, 224]
       type: rgb
     side_view:
-      shape: [3, 240, 240]
+      shape: [3, 224, 224]
       type: rgb
     state:
       shape: [8]
@@ -31,6 +31,6 @@ dataset:
   seed: 42
   max_train_episodes: null
   max_val_episodes: null
-  image_crop_size: 240
+  image_crop_size: 224
   use_ft: false
   rotation_rep: raw
