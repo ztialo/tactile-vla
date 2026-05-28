@@ -510,8 +510,8 @@ def _downsample_ft_wrench(ft_wrench: torch.Tensor, physics_hz: float, ft_log_hz:
 def _resolve_ft_body_indices(base_env) -> tuple[object, int, int]:
     """Resolve fingertip link ids whose incoming fixed-joint wrench is used as FT."""
     robot = base_env.scene["robot"]
-    left_candidates = ("fr3_left_ft_pad", "fr3_left_ft_base", "fr3_left_ft")
-    right_candidates = ("fr3_right_ft_pad", "fr3_right_ft_base", "fr3_right_ft")
+    left_candidates = ("fr3_left_ft_pad",)
+    right_candidates = ("fr3_right_ft_pad",)
     try:
         left_name = next(name for name in left_candidates if name in robot.body_names)
         right_name = next(name for name in right_candidates if name in robot.body_names)

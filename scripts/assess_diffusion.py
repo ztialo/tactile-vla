@@ -52,7 +52,7 @@ parser.add_argument(
 parser.add_argument(
     "--max_action_plan_steps",
     type=int,
-    default=2,
+    default=8,
     help="Maximum number of predicted action steps to execute before querying the policy again. Defaults to full plan.",
 )
 parser.add_argument(
@@ -305,24 +305,26 @@ def _causal_moving_average_torch(values: torch.Tensor, window: int) -> torch.Ten
         raise ValueError(f"ft_ma_window must be >= 1, got {window}")
     if window == 1:
         return values
-    if values.ndim != 3:
-        raise ValueError(f"Expected FT history with shape [B, T, D], got {tuple(values.shape)}")
+    if values.ndim < 3:
+        raise ValueError(f"Expected FT history with shape [B, T, ...], got {tuple(values.shape)}")
 
-    cumsum = torch.cumsum(values, dim=1)
+    original_shape = values.shape
+    values_flat = values.reshape(values.shape[0], values.shape[1], -1)
+    cumsum = torch.cumsum(values_flat, dim=1)
     cumsum = torch.cat((torch.zeros_like(cumsum[:, :1]), cumsum), dim=1)
-    time = values.shape[1]
+    time = values_flat.shape[1]
     end = torch.arange(1, time + 1, device=values.device)
     start = torch.clamp(end - int(window), min=0)
-    counts = (end - start).to(dtype=values.dtype).view(1, time, 1)
+    counts = (end - start).to(dtype=values_flat.dtype).view(1, time, 1)
     smoothed = (cumsum[:, end] - cumsum[:, start]) / counts
-    return smoothed
+    return smoothed.reshape(original_shape)
 
 
 def _resolve_ft_body_indices(env) -> tuple[object, int, int]:
     """Resolve fingertip link ids whose incoming fixed-joint wrench is used as FT."""
     robot = env.scene["robot"]
-    left_candidates = ("fr3_left_ft_pad", "fr3_left_ft_base", "fr3_left_ft")
-    right_candidates = ("fr3_right_ft_pad", "fr3_right_ft_base", "fr3_right_ft")
+    left_candidates = ("fr3_left_ft_pad",)
+    right_candidates = ("fr3_right_ft_pad",)
     try:
         left_name = next(name for name in left_candidates if name in robot.body_names)
         right_name = next(name for name in right_candidates if name in robot.body_names)
@@ -363,6 +365,9 @@ class OfflineDiffusionInferencePolicy:
             key for key, attr in cfg.shape_meta.obs.items() if attr.get("type", "low_dim") == "low_dim"
         ]
         self.wrench_keys = [key for key in self.low_dim_keys if "wrench" in key]
+        self.wrench_shapes = {
+            key: tuple(cfg.shape_meta.obs[key]["shape"]) for key in self.wrench_keys
+        }
         self.use_ft = bool(self.wrench_keys) or bool(cfg.task.dataset.get("use_ft", False)) or args_cli.ft
         self.key_horizons = {
             key: int(self.sample_obs_cfg.get(key, {}).get("horizon", self.n_obs_steps))
@@ -411,6 +416,13 @@ class OfflineDiffusionInferencePolicy:
         if not self.use_ft or self._robot is not None:
             return
         self._robot, self._left_ft_body_idx, self._right_ft_body_idx = _resolve_ft_body_indices(env)
+        left_body_name = self._robot.body_names[self._left_ft_body_idx]
+        right_body_name = self._robot.body_names[self._right_ft_body_idx]
+        print(
+            "[INFO] Diffusion FT source bodies: "
+            f"left={left_body_name} (idx={self._left_ft_body_idx}), "
+            f"right={right_body_name} (idx={self._right_ft_body_idx})."
+        )
 
     def _build_current_obs(self, env) -> dict[str, torch.Tensor]:
         if env._wrist_camera is None:
@@ -426,14 +438,65 @@ class OfflineDiffusionInferencePolicy:
         obs["state"] = torch.cat((env.fingertip_midpoint_pos, env.fingertip_midpoint_quat, gripper_pos), dim=-1)
         if self.wrench_keys:
             self._maybe_init_ft(env)
-            obs["left_ft_wrench"] = self._robot.data.body_incoming_joint_wrench_b[:, self._left_ft_body_idx]
-            obs["right_ft_wrench"] = self._robot.data.body_incoming_joint_wrench_b[:, self._right_ft_body_idx]
+            current_timestep = getattr(env, "episode_length_buf", None)
+            left_substeps = getattr(env, "left_ft_wrench_substeps", None)
+            right_substeps = getattr(env, "right_ft_wrench_substeps", None)
+            obs["left_ft_wrench"] = self._format_wrench_obs(
+                left_substeps,
+                self._robot.data.body_incoming_joint_wrench_b[:, self._left_ft_body_idx],
+                self.wrench_shapes["left_ft_wrench"],
+                current_timestep,
+            )
+            obs["right_ft_wrench"] = self._format_wrench_obs(
+                right_substeps,
+                self._robot.data.body_incoming_joint_wrench_b[:, self._right_ft_body_idx],
+                self.wrench_shapes["right_ft_wrench"],
+                current_timestep,
+            )
         elif args_cli.ft:
             self._maybe_init_ft(env)
             left_ft_wrench = self._robot.data.body_incoming_joint_wrench_b[:, self._left_ft_body_idx]
             right_ft_wrench = self._robot.data.body_incoming_joint_wrench_b[:, self._right_ft_body_idx]
             obs["state"] = torch.cat((obs["state"], left_ft_wrench, right_ft_wrench), dim=-1)
         return obs
+
+    def _format_wrench_obs(
+        self,
+        substep_wrench: torch.Tensor | None,
+        current_wrench: torch.Tensor,
+        expected_shape: tuple[int, ...],
+        timestep_in_episode: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if len(expected_shape) == 1:
+            return current_wrench
+
+        if substep_wrench is None:
+            if len(expected_shape) != 2:
+                raise ValueError(f"Unsupported wrench obs shape without substep buffer: {expected_shape}")
+            return current_wrench.unsqueeze(1).repeat(1, expected_shape[0], 1)
+
+        wrench = substep_wrench
+        if wrench.ndim != 3:
+            raise ValueError(f"Expected substep FT buffer with shape [B, S, 6], got {tuple(wrench.shape)}")
+
+        if timestep_in_episode is not None and wrench.shape[1] >= 2:
+            startup_mask = timestep_in_episode == 0
+            if torch.any(startup_mask):
+                wrench = wrench.clone()
+                wrench[startup_mask, :-1, :] = wrench[startup_mask, 1:, :]
+                wrench[startup_mask, -1, :] = wrench[startup_mask, -2, :]
+
+        if wrench.shape[1:] == expected_shape:
+            return wrench
+        if wrench.shape[2:] != expected_shape[1:]:
+            raise ValueError(
+                f"FT wrench channel shape mismatch: got {tuple(wrench.shape[1:])}, expected {expected_shape}"
+            )
+        if wrench.shape[1] > expected_shape[0]:
+            return wrench[:, -expected_shape[0] :, :]
+        pad = expected_shape[0] - wrench.shape[1]
+        tail = wrench[:, -1:, :].repeat(1, pad, 1)
+        return torch.cat((wrench, tail), dim=1)
 
     def _init_history(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         return {
