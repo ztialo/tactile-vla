@@ -320,6 +320,18 @@ def _causal_moving_average_torch(values: torch.Tensor, window: int) -> torch.Ten
     return smoothed.reshape(original_shape)
 
 
+def _prepare_wrench_history_torch(values: torch.Tensor, negate: bool, window: int) -> torch.Tensor:
+    """Match dataset FT preprocessing on a batched wrench history tensor."""
+    if values.ndim != 4:
+        raise ValueError(f"Expected wrench history with shape [B, T, S, C], got {tuple(values.shape)}")
+    batch_size, horizon, samples_per_step, channels = values.shape
+    flat = values.reshape(batch_size, horizon * samples_per_step, channels)
+    if negate:
+        flat = -flat
+    flat = _causal_moving_average_torch(flat, window)
+    return flat.reshape(batch_size, horizon, samples_per_step, channels)
+
+
 def _resolve_ft_body_indices(env) -> tuple[object, int, int]:
     """Resolve fingertip link ids whose incoming fixed-joint wrench is used as FT."""
     robot = env.scene["robot"]
@@ -374,14 +386,7 @@ class OfflineDiffusionInferencePolicy:
             key: int(self.sample_obs_cfg.get(key, {}).get("horizon", self.n_obs_steps))
             for key in [*self.rgb_keys, *self.low_dim_keys]
         }
-        self._raw_key_horizons = {
-            key: (
-                self.key_horizons[key] + self.ft_ma_window - 1
-                if key in self.wrench_keys
-                else self.key_horizons[key]
-            )
-            for key in [*self.rgb_keys, *self.low_dim_keys]
-        }
+        self._raw_key_horizons = {key: self.key_horizons[key] for key in [*self.rgb_keys, *self.low_dim_keys]}
         if "wrist" not in self.rgb_keys:
             raise ValueError(f"Offline diffusion assessment requires a wrist RGB obs key, got {self.rgb_keys}.")
         if "state" not in self.low_dim_keys:
@@ -516,9 +521,7 @@ class OfflineDiffusionInferencePolicy:
         for key in [*self.rgb_keys, *self.low_dim_keys]:
             history = self._obs_histories[key]
             if key in self.wrench_keys:
-                if self.negate_ft:
-                    history = -history
-                history = _causal_moving_average_torch(history, self.ft_ma_window)
+                history = _prepare_wrench_history_torch(history, self.negate_ft, self.ft_ma_window)
             obs_dict[key] = history[:, -self.key_horizons[key] :]
         return obs_dict
 
