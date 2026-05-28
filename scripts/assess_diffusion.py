@@ -108,6 +108,21 @@ parser.add_argument(
     default=False,
     help="Append left/right 6D FT wrench readings to the low-dimensional state during inference.",
 )
+parser.add_argument(
+    "--use_pre_action_wait",
+    action="store_true",
+    default=False,
+    help=(
+        "After each reset, execute zero diffusion actions for the rollout dataset's pre_action_wait window. "
+        "This matches visuotactile logging behavior and lets the task-space controller clip the EEF back into bounds."
+    ),
+)
+parser.add_argument(
+    "--pre_action_wait_seconds",
+    type=float,
+    default=None,
+    help="Override the pre-action wait duration in seconds. Only used with --use_pre_action_wait.",
+)
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -389,6 +404,8 @@ class OfflineDiffusionInferencePolicy:
         self.n_obs_steps = int(cfg.get("n_obs_steps", cfg.task.dataset.n_obs_steps))
         self.ft_ma_window = int(cfg.task.dataset.get("ft_ma_window", cfg.task.get("ft_ma_window", 1)))
         self.negate_ft = bool(cfg.task.dataset.get("negate_ft", cfg.task.get("negate_ft", False)))
+        self.use_pre_action_wait = bool(args_cli.use_pre_action_wait)
+        self.pre_action_wait_seconds = None
         self.rgb_keys = [
             key for key, attr in cfg.shape_meta.obs.items() if attr.get("type", "low_dim") == "rgb"
         ]
@@ -426,6 +443,8 @@ class OfflineDiffusionInferencePolicy:
         self._obs_histories = None
         self._action_plan = None
         self._action_step = 0
+        self._pre_action_wait_steps = None
+        self._warmup_step = 0
         self.max_action_plan_steps = (
             int(args_cli.max_action_plan_steps) if args_cli.max_action_plan_steps is not None else None
         )
@@ -433,11 +452,13 @@ class OfflineDiffusionInferencePolicy:
         self._left_ft_body_idx = None
         self._right_ft_body_idx = None
         self._logged_rgb_resolution = self._load_logged_rgb_resolution()
+        self._load_pre_action_wait_hint()
 
     def reset(self):
         self._obs_histories = None
         self._action_plan = None
         self._action_step = 0
+        self._warmup_step = 0
 
     def _load_logged_rgb_resolution(self) -> tuple[int, int] | None:
         dataset_path = self.dataset_path
@@ -458,6 +479,29 @@ class OfflineDiffusionInferencePolicy:
             print(f"[WARN] Failed to load training image preprocessing hints from {dataset_path}: {exc}")
             return None
 
+    def _load_pre_action_wait_hint(self):
+        if not self.use_pre_action_wait:
+            return
+        if args_cli.pre_action_wait_seconds is not None:
+            self.pre_action_wait_seconds = float(args_cli.pre_action_wait_seconds)
+        dataset_path = self.dataset_path
+        if self.pre_action_wait_seconds is None and dataset_path:
+            dataset_path = os.path.abspath(os.path.expanduser(dataset_path))
+            if os.path.exists(dataset_path):
+                try:
+                    with h5py.File(dataset_path, "r") as h5_file:
+                        value = h5_file.attrs.get("pre_action_wait_seconds", None)
+                        if value is not None:
+                            self.pre_action_wait_seconds = float(value)
+                except Exception as exc:
+                    print(f"[WARN] Failed to load pre_action_wait_seconds from {dataset_path}: {exc}")
+        if self.pre_action_wait_seconds is None:
+            self.pre_action_wait_seconds = 0.0
+        print(
+            "[INFO] Assess pre-action wait enabled: "
+            f"{self.pre_action_wait_seconds:.3f} s of zero diffusion action after reset."
+        )
+
     def _normalize_images(self, rgb: torch.Tensor) -> torch.Tensor:
         if self._logged_rgb_resolution is not None:
             target_h, target_w = self._logged_rgb_resolution
@@ -466,6 +510,17 @@ class OfflineDiffusionInferencePolicy:
         rgb = _center_crop_torch(rgb, self.image_crop_size)
         rgb = rgb.permute(0, 3, 1, 2).contiguous()
         return rgb.float() / 255.0
+
+    def _ensure_pre_action_wait_steps(self, env):
+        if self._pre_action_wait_steps is not None:
+            return
+        wait_seconds = float(self.pre_action_wait_seconds or 0.0)
+        self._pre_action_wait_steps = max(int(round(wait_seconds / float(env.step_dt))), 0)
+        if self.use_pre_action_wait:
+            print(
+                "[INFO] Pre-action wait steps: "
+                f"{self._pre_action_wait_steps} at dt={float(env.step_dt):.6f} s."
+            )
 
     def _maybe_init_ft(self, env):
         if not self.use_ft or self._robot is not None:
@@ -575,11 +630,16 @@ class OfflineDiffusionInferencePolicy:
 
     @torch.inference_mode()
     def act(self, env) -> torch.Tensor:
+        self._ensure_pre_action_wait_steps(env)
         obs = self._build_current_obs(env)
         if self._obs_histories is None:
             self._obs_histories = self._init_history(obs)
         else:
             self._update_history(obs)
+
+        if self.use_pre_action_wait and self._warmup_step < self._pre_action_wait_steps:
+            self._warmup_step += 1
+            return torch.zeros((env.num_envs, self.model.action_dim), device=self.device, dtype=torch.float32)
 
         if self._action_plan is None or self._action_step >= self._current_plan_horizon():
             obs_dict = self._build_model_obs_dict()

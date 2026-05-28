@@ -120,6 +120,15 @@ def _parse_args() -> argparse.Namespace:
             "'both' saves separate left and right figures."
         ),
     )
+    parser.add_argument(
+        "--plot_actions",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Save a 3x2 action comparison plot for action, executed_action, and "
+            "controller_effective_action when present in the H5."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -142,6 +151,46 @@ def _get_wrench_axis_names(h5_file: h5py.File) -> list[str]:
     if len(names) != 6:
         names = ["fx", "fy", "fz", "tx", "ty", "tz"]
     return names
+
+
+def _save_action_comparison_plot(
+    x: np.ndarray,
+    action: np.ndarray,
+    executed_action: np.ndarray | None,
+    controller_effective_action: np.ndarray | None,
+    title: str,
+    output_path: Path,
+):
+    """Save a 3x2 plot comparing action label variants across all 6 action dims."""
+    axis_names = ("dx", "dy", "dz", "droll", "dpitch", "dyaw")
+    fig, axes = plt.subplots(3, 2, figsize=(13, 9), sharex=True)
+    axes = np.asarray(axes)
+
+    for idx, axis_name in enumerate(axis_names):
+        ax = axes[idx // 2, idx % 2]
+        ax.plot(x, action[:, idx], color="tab:blue", linewidth=1.8, label="action label")
+        if executed_action is not None:
+            ax.plot(x, executed_action[:, idx], color="tab:orange", linewidth=1.3, alpha=0.85, label="executed_action")
+        if controller_effective_action is not None:
+            ax.plot(
+                x,
+                controller_effective_action[:, idx],
+                color="tab:green",
+                linewidth=1.3,
+                alpha=0.85,
+                label="controller_effective_action",
+            )
+        ax.set_title(axis_name)
+        ax.grid(alpha=0.3)
+
+    axes[2, 0].set_xlabel("step")
+    axes[2, 1].set_xlabel("step")
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper right")
+    fig.suptitle(title, fontsize=12)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
 
 
 def _center_crop_numpy(images: np.ndarray, crop_size: int | None) -> np.ndarray:
@@ -517,6 +566,7 @@ def main():
     crop_video_path = out_dir / "replay_crop.mp4"
     plot_path = out_dir / "ft_wrench.png"
     sync_video_path = out_dir / "replay_ft_sync.mp4"
+    action_plot_path = out_dir / "action_comparison.png"
     extra_plot_paths: list[Path] = []
 
     with h5py.File(h5_path, "r") as h5_file:
@@ -567,6 +617,17 @@ def main():
         right_ft = None
         axis_names = None
         ft_sample_hz = None
+        action = None
+        executed_action = None
+        controller_effective_action = None
+        if args.plot_actions:
+            if "action" not in h5_file:
+                raise KeyError("H5 file is missing required dataset for --plot_actions: ['action']")
+            action = np.asarray(h5_file["action"][rows], dtype=np.float32)
+            if "executed_action" in h5_file:
+                executed_action = np.asarray(h5_file["executed_action"][rows], dtype=np.float32)
+            if "controller_effective_action" in h5_file:
+                controller_effective_action = np.asarray(h5_file["controller_effective_action"][rows], dtype=np.float32)
         if not args.vision:
             # IsaacLab body_incoming_joint_wrench_b is the incoming joint wrench on the link.
             # Negate it here to visualize the reaction wrench measured by the CoinFT/environment.
@@ -731,6 +792,16 @@ def main():
                 )
                 extra_plot_paths.append(side_plot_path)
 
+    if args.plot_actions:
+        _save_action_comparison_plot(
+            x=np.arange(action.shape[0], dtype=np.int64),
+            action=action,
+            executed_action=executed_action,
+            controller_effective_action=controller_effective_action,
+            title=f"{h5_path.name} | demo {demo_label} | {demo_step_text} | action comparison",
+            output_path=action_plot_path,
+        )
+
     if (not args.no_video) and args.res in ("raw", "crop"):
         print(f"[INFO] Wrote video: {video_path}")
     if wrote_raw_video and (not args.no_video) and args.res == "both":
@@ -758,6 +829,8 @@ def main():
             print("[INFO] Sync video note: resized FT plot panel to match wrist frame height.")
         elif not args.no_video:
             print("[INFO] Sync video note: no resize needed (matched panel heights).")
+    if args.plot_actions:
+        print(f"[INFO] Wrote plot:  {action_plot_path}")
     if args.no_video:
         print("[INFO] Video generation disabled by --no_video.")
     print(

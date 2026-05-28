@@ -204,6 +204,7 @@ class FactoryEnv(DirectRLEnv):
         # Control targets.
         self.ctrl_target_joint_pos = torch.zeros((self.num_envs, self._robot.num_joints), device=self.device)
         self.prev_action_obs = torch.zeros((self.num_envs, PREV_ACTION_DIM), device=self.device)
+        self.controller_effective_action = torch.zeros((self.num_envs, self.cfg.action_space), device=self.device)
         self.ema_factor = self.cfg.ctrl.ema_factor
         self.dead_zone_thresholds = None
 
@@ -474,6 +475,16 @@ class FactoryEnv(DirectRLEnv):
             roll=target_euler_xyz[:, 0], pitch=target_euler_xyz[:, 1], yaw=target_euler_xyz[:, 2]
         )
 
+        # Expose the controller-effective 6D action after workspace clipping and upright-orientation constraints.
+        effective_pos_action = (ctrl_target_fingertip_midpoint_pos - self.fingertip_midpoint_pos) / self.pos_threshold
+        rot_diff_quat = torch_utils.quat_mul(
+            ctrl_target_fingertip_midpoint_quat, torch_utils.quat_conjugate(self.fingertip_midpoint_quat)
+        )
+        effective_rot_action = axis_angle_from_quat(rot_diff_quat) / self.rot_threshold
+        if self.cfg_task.unidirectional_rot:
+            effective_rot_action[:, 2] = -2.0 * effective_rot_action[:, 2] - 1.0
+        self.controller_effective_action = torch.cat((effective_pos_action, effective_rot_action), dim=-1)
+
         grasp_close_width = self.cfg_task.held_asset_cfg.diameter / 2.0 * 0.875
         self.generate_ctrl_signals(
             ctrl_target_fingertip_midpoint_pos=ctrl_target_fingertip_midpoint_pos,
@@ -526,6 +537,16 @@ class FactoryEnv(DirectRLEnv):
         ctrl_target_fingertip_midpoint_quat = torch_utils.quat_from_euler_xyz(
             roll=target_euler_xyz[:, 0], pitch=target_euler_xyz[:, 1], yaw=target_euler_xyz[:, 2]
         )
+
+        # Expose the controller-effective 6D action after workspace clipping and upright-orientation constraints.
+        effective_pos_action = (ctrl_target_fingertip_midpoint_pos - self.fingertip_midpoint_pos) / self.pos_threshold
+        rot_diff_quat = torch_utils.quat_mul(
+            ctrl_target_fingertip_midpoint_quat, torch_utils.quat_conjugate(self.fingertip_midpoint_quat)
+        )
+        effective_rot_action = axis_angle_from_quat(rot_diff_quat) / self.rot_threshold
+        if self.cfg_task.unidirectional_rot:
+            effective_rot_action[:, 2] = -2.0 * effective_rot_action[:, 2] - 1.0
+        self.controller_effective_action = torch.cat((effective_pos_action, effective_rot_action), dim=-1)
 
         grasp_close_width = self.cfg_task.held_asset_cfg.diameter / 2.0 * 0.875
         self.generate_ctrl_signals(
@@ -1062,6 +1083,7 @@ class FactoryEnv(DirectRLEnv):
         self.actions = torch.zeros_like(self.actions)
         self.prev_actions = torch.zeros_like(self.actions)
         self.prev_action_obs = torch.zeros_like(self.prev_action_obs)
+        self.controller_effective_action = torch.zeros_like(self.controller_effective_action)
 
         # Zero initial velocity.
         self.ee_angvel_fd[:, :] = 0.0
