@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import dill
 import hydra
+import math
 import os
 import sys
 import time
@@ -387,6 +388,11 @@ class OfflineDiffusionInferencePolicy:
             for key in [*self.rgb_keys, *self.low_dim_keys]
         }
         self._raw_key_horizons = {key: self.key_horizons[key] for key in [*self.rgb_keys, *self.low_dim_keys]}
+        for key in self.wrench_keys:
+            shape = self.wrench_shapes[key]
+            samples_per_step = int(shape[0]) if len(shape) >= 2 else 1
+            extra_steps = int(math.ceil(max(self.ft_ma_window - 1, 0) / float(samples_per_step)))
+            self._raw_key_horizons[key] = self.key_horizons[key] + extra_steps
         if "wrist" not in self.rgb_keys:
             raise ValueError(f"Offline diffusion assessment requires a wrist RGB obs key, got {self.rgb_keys}.")
         if "state" not in self.low_dim_keys:
@@ -396,6 +402,7 @@ class OfflineDiffusionInferencePolicy:
         print(
             "[INFO] Diffusion checkpoint FT config: "
             f"wrench_horizon={self.key_horizons.get('left_ft_wrench', 'n/a')}, "
+            f"raw_wrench_horizon={self._raw_key_horizons.get('left_ft_wrench', 'n/a')}, "
             f"ft_ma_window={self.ft_ma_window}, "
             f"negate_ft={self.negate_ft}."
         )
