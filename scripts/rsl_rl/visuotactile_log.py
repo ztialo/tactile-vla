@@ -916,12 +916,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 if args_cli.log_success_only and hasattr(base_env, "ep_succeeded"):
                     prev_ep_succeeded = base_env.ep_succeeded.clone().to(dtype=torch.bool)
                 # agent stepping
-                raw_actions = policy(obs) * args_cli.action_scale
+                controller_actions = policy(obs) * args_cli.action_scale
+                pre_action_hold_mask = None
                 hold_mask = None
                 if h5_file is not None:
-                    hold_mask = timestep_in_episode < pre_action_wait_steps
+                    pre_action_hold_mask = timestep_in_episode < pre_action_wait_steps
+                    hold_mask = pre_action_hold_mask
                     if args_cli.log_success_only:
                         hold_mask = torch.logical_or(hold_mask, pending_success)
+                raw_actions = controller_actions
                 if hold_mask is not None and torch.any(hold_mask):
                     raw_actions = raw_actions.clone()
                     raw_actions[hold_mask] = 0.0
@@ -994,11 +997,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         "timeout": _tensor_to_numpy(timeout, log_env_ids, dtype=np.bool_),
                         "gripper_pos": _tensor_to_numpy(gripper_pos, log_env_ids, dtype=np.float32),
                         "action": _tensor_to_numpy(actions, log_env_ids, dtype=np.float32),
+                        "executed_action": _tensor_to_numpy(actions, log_env_ids, dtype=np.float32),
                         "eef_pos": _tensor_to_numpy(base_env.fingertip_midpoint_pos, log_env_ids, dtype=np.float32),
                         "eef_quat": _tensor_to_numpy(base_env.fingertip_midpoint_quat, log_env_ids, dtype=np.float32),
                         "left_ft_wrench": _tensor_to_numpy(left_ft_wrench, log_env_ids, dtype=np.float32),
                         "right_ft_wrench": _tensor_to_numpy(right_ft_wrench, log_env_ids, dtype=np.float32),
                     }
+                    if pre_action_hold_mask is not None and torch.any(pre_action_hold_mask):
+                        label_actions = actions.clone()
+                        label_actions[pre_action_hold_mask] = controller_actions[pre_action_hold_mask]
+                        batch["action"] = _tensor_to_numpy(label_actions, log_env_ids, dtype=np.float32)
                     if not args_cli.no_log_images:
                         if not hasattr(base_env, "_wrist_camera"):
                             raise AttributeError(
