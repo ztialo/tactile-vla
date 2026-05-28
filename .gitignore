@@ -23,6 +23,7 @@ events.out.tfevents.*
 *.py[cod]
 
 logs/
+ft-logs/
 *.pt
 *.onnx
 

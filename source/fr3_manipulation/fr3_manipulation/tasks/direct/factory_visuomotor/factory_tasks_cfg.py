@@ -52,7 +52,7 @@ class FactoryTask:
 
     # Robot
     hand_init_pos: list = [0.0, 0.0, 0.015]  # Relative to fixed asset tip.
-    hand_init_pos_noise: list = [0.02, 0.02, 0.01]
+    hand_init_pos_noise: list = [0.0, 0.0, 0.0]
     hand_init_orn: list = [3.1416, 0, 2.356]
     hand_init_orn_noise: list = [0.0, 0.0, 1.57]
 
@@ -83,7 +83,7 @@ class FactoryTask:
     keypoint_coef_coarse: list = [50, 2]  # Movement to align the assets.
     keypoint_coef_fine: list = [100, 0]  # Smaller distances for threading or last-inch insertion.
     # Fixed-asset height fraction for which different bonuses are rewarded (see individual tasks).
-    success_threshold: float = 0.04
+    success_threshold: float = 0.08
     engage_threshold: float = 0.9
 
 
@@ -112,13 +112,13 @@ class PegInsert(FactoryTask):
     duration_s = 10.0
 
     # Robot
-    hand_init_pos: list = [0.0, 0.0, 0.047]  # Relative to fixed asset tip.
+    hand_init_pos: list = [0.0, 0.0, 0.080]  # Relative to fixed asset tip.
     hand_init_pos_noise: list = [0.02, 0.02, 0.01]
     hand_init_orn: list = [3.1416, 0.0, 0.0]
-    hand_init_orn_noise: list = [0.0, 0.0, 0.785]
+    hand_init_orn_noise: list = [0.0, 0.0, 0.0]
 
     # Fixed Asset (applies to all tasks)
-    fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.05]
+    fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.0]
     fixed_asset_init_orn_deg: float = 0.0
     fixed_asset_init_orn_range_deg: float = 360.0
 
@@ -131,7 +131,7 @@ class PegInsert(FactoryTask):
     keypoint_coef_coarse: list = [50, 2]
     keypoint_coef_fine: list = [100, 0]
     # Fraction of socket height.
-    success_threshold: float = 0.04
+    success_threshold: float = 0.16
     engage_threshold: float = 0.9
 
     fixed_asset: ArticulationCfg = ArticulationCfg(

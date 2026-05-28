@@ -52,7 +52,7 @@ class FactoryTask:
 
     # Robot
     hand_init_pos: list = [0.0, 0.0, 0.015]  # Relative to fixed asset tip.
-    hand_init_pos_noise: list = [0.02, 0.02, 0.01]
+    hand_init_pos_noise: list = [0.0, 0.0, 0.0]
     hand_init_orn: list = [3.1416, 0, 2.356]
     hand_init_orn_noise: list = [0.0, 0.0, 1.57]
     randomize_hand_init_tilt: bool = False
@@ -69,11 +69,16 @@ class FactoryTask:
     # Held Asset (applies to all tasks)
     held_asset_pos_noise: list = [0.0, 0.006, 0.003]  # noise level of the held asset in gripper
     held_asset_rot_init: float = -90.0
+    held_asset_grasp_z_offset: float = 0.0  # Additional +Z lift of the held asset inside the gripper frame.
 
     # Reward
     ee_success_yaw: float = 0.0  # nut_thread task only.
     action_penalty_ee_scale: float = 0.0
     action_grad_penalty_scale: float = 0.0
+    yaw_action_penalty_scale: float = 0.0
+    yaw_action_penalty_height_threshold: float = 0.0
+    z_action_penalty_scale: float = 0.0
+    z_action_penalty_height_threshold: float = 0.0
     # Reward function details can be found in Appendix B of https://arxiv.org/pdf/2408.04587.
     # Multi-scale keypoints are used to capture different phases of the task.
     # Each reward passes the keypoint distance, x, through a squashing function:
@@ -85,7 +90,7 @@ class FactoryTask:
     keypoint_coef_coarse: list = [50, 2]  # Movement to align the assets.
     keypoint_coef_fine: list = [100, 0]  # Smaller distances for threading or last-inch insertion.
     # Fixed-asset height fraction for which different bonuses are rewarded (see individual tasks).
-    success_threshold: float = 0.04
+    success_threshold: float = 0.08
     engage_threshold: float = 0.9
 
 
@@ -114,13 +119,13 @@ class PegInsert(FactoryTask):
     duration_s = 10.0
 
     # Robot
-    hand_init_pos: list = [0.0, 0.0, 0.047]  # Relative to fixed asset tip.
+    hand_init_pos: list = [0.0, 0.0, 0.080]  # Relative to fixed asset tip.
     hand_init_pos_noise: list = [0.02, 0.02, 0.01]
     hand_init_orn: list = [3.1416, 0.0, 0.0]
-    hand_init_orn_noise: list = [0.0, 0.0, 0.785]
+    hand_init_orn_noise: list = [0.0, 0.0, 0.0]
 
     # Fixed Asset (applies to all tasks)
-    fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.05]
+    fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.0]
     fixed_asset_init_orn_deg: float = 0.0
     fixed_asset_init_orn_range_deg: float = 360.0
 
@@ -133,7 +138,7 @@ class PegInsert(FactoryTask):
     keypoint_coef_coarse: list = [50, 2]
     keypoint_coef_fine: list = [100, 0]
     # Fraction of socket height.
-    success_threshold: float = 0.04
+    success_threshold: float = 0.16
     engage_threshold: float = 0.9
 
     fixed_asset: ArticulationCfg = ArticulationCfg(
@@ -167,7 +172,7 @@ class PegInsert(FactoryTask):
             usd_path=held_asset_cfg.usd_path,
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=True,
+                disable_gravity=False,
                 max_depenetration_velocity=5.0,
                 linear_damping=0.0,
                 angular_damping=0.0,
@@ -273,10 +278,10 @@ class GearMesh(FactoryTask):
     add_flanking_gears_prob = 1.0
 
     # Robot
-    hand_init_pos: list = [0.0, 0.0, 0.035]  # Relative to fixed asset tip.
-    hand_init_pos_noise: list = [0.02, 0.02, 0.01]
+    hand_init_pos: list = [0.0, 0.0, 0.15]  # Relative to fixed asset tip.
+    hand_init_pos_noise: list = [0.03, 0.03, 0.0]
     hand_init_orn: list = [3.1416, 0, 0.0]
-    hand_init_orn_noise: list = [0.0, 0.0, 0.785]
+    hand_init_orn_noise: list = [0.0, 0.0, 0.0]
 
     # Fixed Asset (applies to all tasks)
     fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.05]
@@ -286,6 +291,9 @@ class GearMesh(FactoryTask):
     # Held Asset (applies to all tasks)
     held_asset_pos_noise: list = [0.003, 0.0, 0.003]  # noise level of the held asset in gripper
     held_asset_rot_init: float = -90.0
+    held_asset_grasp_z_offset: float = 0.008
+    yaw_action_penalty_scale: float = 0.1
+    yaw_action_penalty_height_threshold: float = 0.003
 
     keypoint_coef_baseline: list = [5, 4]
     keypoint_coef_coarse: list = [50, 2]
@@ -315,7 +323,7 @@ class GearMesh(FactoryTask):
             collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005, rest_offset=0.0),
         ),
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.6, 0.0, 0.05), rot=(1.0, 0.0, 0.0, 0.0), joint_pos={}, joint_vel={}
+            pos=(0.45, 0.0, 0.05), rot=(1.0, 0.0, 0.0, 0.0), joint_pos={}, joint_vel={}
         ),
         actuators={},
     )
@@ -325,7 +333,7 @@ class GearMesh(FactoryTask):
             usd_path=held_asset_cfg.usd_path,
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=True,
+                disable_gravity=False,
                 max_depenetration_velocity=5.0,
                 linear_damping=0.0,
                 angular_damping=0.0,
@@ -431,7 +439,7 @@ class NutThread(FactoryTask):
             usd_path=held_asset_cfg.usd_path,
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=True,
+                disable_gravity=False,
                 max_depenetration_velocity=5.0,
                 linear_damping=0.0,
                 angular_damping=0.0,

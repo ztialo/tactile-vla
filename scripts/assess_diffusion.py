@@ -49,6 +49,18 @@ parser.add_argument(
     default=1,
     help="Number of episode-length loops to run before stopping. Use <= 0 to run until closed.",
 )
+parser.add_argument(
+    "--max_action_plan_steps",
+    type=int,
+    default=8,
+    help="Maximum number of predicted action steps to execute before querying the policy again. Defaults to full plan.",
+)
+parser.add_argument(
+    "--num_inference_steps",
+    type=int,
+    default=16,
+    help="Override the diffusion sampler step count stored in the checkpoint.",
+)
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment.")
@@ -81,6 +93,12 @@ parser.add_argument(
     action="store_true",
     default=False,
     help="Disable fixed-asset Z-position randomization while keeping XY position randomization unchanged.",
+)
+parser.add_argument(
+    "--fixed_held_asset_height",
+    action="store_true",
+    default=False,
+    help="Disable held-asset Z-position randomization while keeping XY held-asset randomization unchanged.",
 )
 parser.add_argument(
     "--ft",
@@ -171,6 +189,14 @@ def _apply_factory_init_overrides(env_cfg):
         pos_noise[2] = 0.0
         task_cfg.fixed_asset_init_pos_noise = pos_noise
         print("[INFO] Fixed asset height enabled: zeroed fixed-asset Z-position randomization noise.")
+
+    if args_cli.fixed_held_asset_height and hasattr(task_cfg, "held_asset_pos_noise"):
+        pos_noise = list(task_cfg.held_asset_pos_noise)
+        if len(pos_noise) < 3:
+            raise ValueError("task.held_asset_pos_noise must have at least 3 elements [x, y, z].")
+        pos_noise[2] = 0.0
+        task_cfg.held_asset_pos_noise = pos_noise
+        print("[INFO] Fixed held-asset height enabled: zeroed held-asset Z-position randomization noise.")
 
 
 def _to_uint8_rgb(frame: torch.Tensor):
@@ -273,14 +299,56 @@ def _center_crop_torch(images: torch.Tensor, crop_size: int | None) -> torch.Ten
     return images[:, top : top + crop_size, left : left + crop_size, :]
 
 
+def _causal_moving_average_torch(values: torch.Tensor, window: int) -> torch.Tensor:
+    """Apply a causal moving average over the time axis without future leakage."""
+    if window < 1:
+        raise ValueError(f"ft_ma_window must be >= 1, got {window}")
+    if window == 1:
+        return values
+    if values.ndim < 3:
+        raise ValueError(f"Expected FT history with shape [B, T, ...], got {tuple(values.shape)}")
+
+    original_shape = values.shape
+    values_flat = values.reshape(values.shape[0], values.shape[1], -1)
+    cumsum = torch.cumsum(values_flat, dim=1)
+    cumsum = torch.cat((torch.zeros_like(cumsum[:, :1]), cumsum), dim=1)
+    time = values_flat.shape[1]
+    end = torch.arange(1, time + 1, device=values.device)
+    start = torch.clamp(end - int(window), min=0)
+    counts = (end - start).to(dtype=values_flat.dtype).view(1, time, 1)
+    smoothed = (cumsum[:, end] - cumsum[:, start]) / counts
+    return smoothed.reshape(original_shape)
+
+
+def _prepare_wrench_history_torch(values: torch.Tensor, negate: bool, window: int) -> torch.Tensor:
+    """Match dataset FT preprocessing on a batched wrench history tensor."""
+    if values.ndim != 4:
+        raise ValueError(f"Expected wrench history with shape [B, T, S, C], got {tuple(values.shape)}")
+    batch_size, horizon, samples_per_step, channels = values.shape
+    flat = values.reshape(batch_size, horizon * samples_per_step, channels)
+    if negate:
+        flat = -flat
+    flat = _causal_moving_average_torch(flat, window)
+    return flat.reshape(batch_size, horizon, samples_per_step, channels)
+
+
 def _resolve_ft_body_indices(env) -> tuple[object, int, int]:
-    """Resolve the left/right FT body ids on the robot articulation."""
+    """Resolve fingertip link ids whose incoming fixed-joint wrench is used as FT."""
     robot = env.scene["robot"]
-    left_ids, _ = robot.find_bodies("fr3_left_ft")
-    right_ids, _ = robot.find_bodies("fr3_right_ft")
-    if len(left_ids) == 0 or len(right_ids) == 0:
-        raise ValueError("Could not resolve FT bodies 'fr3_left_ft' and 'fr3_right_ft' on scene['robot'].")
-    return robot, int(left_ids[0]), int(right_ids[0])
+    left_candidates = ("fr3_left_ft_pad",)
+    right_candidates = ("fr3_right_ft_pad",)
+    try:
+        left_name = next(name for name in left_candidates if name in robot.body_names)
+        right_name = next(name for name in right_candidates if name in robot.body_names)
+        left_id = robot.body_names.index(left_name)
+        right_id = robot.body_names.index(right_name)
+    except StopIteration as exc:
+        raise ValueError(
+            "Could not resolve fingertip FT bodies from "
+            f"{left_candidates} and {right_candidates}. "
+            f"Available bodies: {robot.body_names}"
+        ) from exc
+    return robot, left_id, right_id
 
 
 class OfflineDiffusionInferencePolicy:
@@ -295,25 +363,54 @@ class OfflineDiffusionInferencePolicy:
         self.device = device
         self.model = model.to(device)
         self.model.eval()
+        if args_cli.num_inference_steps is not None:
+            self.model.num_inference_steps = int(args_cli.num_inference_steps)
+            print(f"[INFO] Overriding diffusion num_inference_steps to {self.model.num_inference_steps}.")
         self.image_crop_size = cfg.task.dataset.get("image_crop_size")
-        self.use_ft = bool(cfg.task.dataset.get("use_ft", False)) or args_cli.ft
+        self.sample_obs_cfg = cfg.shape_meta.get("sample", {}).get("obs", {}).get("sparse", {})
         self.n_obs_steps = int(cfg.get("n_obs_steps", cfg.task.dataset.n_obs_steps))
+        self.ft_ma_window = int(cfg.task.dataset.get("ft_ma_window", cfg.task.get("ft_ma_window", 1)))
+        self.negate_ft = bool(cfg.task.dataset.get("negate_ft", cfg.task.get("negate_ft", False)))
         self.rgb_keys = [
             key for key, attr in cfg.shape_meta.obs.items() if attr.get("type", "low_dim") == "rgb"
         ]
+        self.low_dim_keys = [
+            key for key, attr in cfg.shape_meta.obs.items() if attr.get("type", "low_dim") == "low_dim"
+        ]
+        self.wrench_keys = [key for key in self.low_dim_keys if "wrench" in key]
+        self.wrench_shapes = {
+            key: tuple(cfg.shape_meta.obs[key]["shape"]) for key in self.wrench_keys
+        }
+        self.use_ft = bool(self.wrench_keys) or bool(cfg.task.dataset.get("use_ft", False)) or args_cli.ft
+        self.key_horizons = {
+            key: int(self.sample_obs_cfg.get(key, {}).get("horizon", self.n_obs_steps))
+            for key in [*self.rgb_keys, *self.low_dim_keys]
+        }
+        self._raw_key_horizons = {key: self.key_horizons[key] for key in [*self.rgb_keys, *self.low_dim_keys]}
         if "wrist" not in self.rgb_keys:
             raise ValueError(f"Offline diffusion assessment requires a wrist RGB obs key, got {self.rgb_keys}.")
-        self._image_histories = None
-        self._state_history = None
+        if "state" not in self.low_dim_keys:
+            raise ValueError(f"Offline diffusion assessment requires a state low-dim obs key, got {self.low_dim_keys}.")
+        if args_cli.ft and not self.wrench_keys:
+            print("[WARN] --ft was passed, but checkpoint shape_meta has no separate wrench obs keys.")
+        print(
+            "[INFO] Diffusion checkpoint FT config: "
+            f"wrench_horizon={self.key_horizons.get('left_ft_wrench', 'n/a')}, "
+            f"ft_ma_window={self.ft_ma_window}, "
+            f"negate_ft={self.negate_ft}."
+        )
+        self._obs_histories = None
         self._action_plan = None
         self._action_step = 0
+        self.max_action_plan_steps = (
+            int(args_cli.max_action_plan_steps) if args_cli.max_action_plan_steps is not None else None
+        )
         self._robot = None
         self._left_ft_body_idx = None
         self._right_ft_body_idx = None
 
     def reset(self):
-        self._image_histories = None
-        self._state_history = None
+        self._obs_histories = None
         self._action_plan = None
         self._action_step = 0
 
@@ -326,45 +423,118 @@ class OfflineDiffusionInferencePolicy:
         if not self.use_ft or self._robot is not None:
             return
         self._robot, self._left_ft_body_idx, self._right_ft_body_idx = _resolve_ft_body_indices(env)
+        left_body_name = self._robot.body_names[self._left_ft_body_idx]
+        right_body_name = self._robot.body_names[self._right_ft_body_idx]
+        print(
+            "[INFO] Diffusion FT source bodies: "
+            f"left={left_body_name} (idx={self._left_ft_body_idx}), "
+            f"right={right_body_name} (idx={self._right_ft_body_idx})."
+        )
 
-    def _build_current_obs(self, env) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    def _build_current_obs(self, env) -> dict[str, torch.Tensor]:
         if env._wrist_camera is None:
             raise RuntimeError("Offline diffusion policy requires wrist camera data, but no wrist camera is configured.")
-        images = {"wrist": self._normalize_images(env._wrist_camera.data.output["rgb"][..., :3])}
+        obs = {"wrist": self._normalize_images(env._wrist_camera.data.output["rgb"][..., :3])}
         if "side_view" in self.rgb_keys:
             if getattr(env, "_side_view_camera", None) is None:
                 raise RuntimeError(
                     "Offline diffusion policy requires side_view image data, but no side-view camera is configured."
                 )
-            images["side_view"] = self._normalize_images(env._side_view_camera.data.output["rgb"][..., :3])
+            obs["side_view"] = self._normalize_images(env._side_view_camera.data.output["rgb"][..., :3])
         gripper_pos = torch.mean(env.joint_pos[:, 7:], dim=1, keepdim=True)
-        state_parts = [env.fingertip_midpoint_pos, env.fingertip_midpoint_quat, gripper_pos]
-        if self.use_ft:
+        obs["state"] = torch.cat((env.fingertip_midpoint_pos, env.fingertip_midpoint_quat, gripper_pos), dim=-1)
+        if self.wrench_keys:
+            self._maybe_init_ft(env)
+            current_timestep = getattr(env, "episode_length_buf", None)
+            left_substeps = getattr(env, "left_ft_wrench_substeps", None)
+            right_substeps = getattr(env, "right_ft_wrench_substeps", None)
+            obs["left_ft_wrench"] = self._format_wrench_obs(
+                left_substeps,
+                self._robot.data.body_incoming_joint_wrench_b[:, self._left_ft_body_idx],
+                self.wrench_shapes["left_ft_wrench"],
+                current_timestep,
+            )
+            obs["right_ft_wrench"] = self._format_wrench_obs(
+                right_substeps,
+                self._robot.data.body_incoming_joint_wrench_b[:, self._right_ft_body_idx],
+                self.wrench_shapes["right_ft_wrench"],
+                current_timestep,
+            )
+        elif args_cli.ft:
             self._maybe_init_ft(env)
             left_ft_wrench = self._robot.data.body_incoming_joint_wrench_b[:, self._left_ft_body_idx]
             right_ft_wrench = self._robot.data.body_incoming_joint_wrench_b[:, self._right_ft_body_idx]
-            state_parts.extend((left_ft_wrench, right_ft_wrench))
-        return images, torch.cat(state_parts, dim=-1)
+            obs["state"] = torch.cat((obs["state"], left_ft_wrench, right_ft_wrench), dim=-1)
+        return obs
+
+    def _format_wrench_obs(
+        self,
+        substep_wrench: torch.Tensor | None,
+        current_wrench: torch.Tensor,
+        expected_shape: tuple[int, ...],
+        timestep_in_episode: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if len(expected_shape) == 1:
+            return current_wrench
+
+        if substep_wrench is None:
+            if len(expected_shape) != 2:
+                raise ValueError(f"Unsupported wrench obs shape without substep buffer: {expected_shape}")
+            return current_wrench.unsqueeze(1).repeat(1, expected_shape[0], 1)
+
+        wrench = substep_wrench
+        if wrench.ndim != 3:
+            raise ValueError(f"Expected substep FT buffer with shape [B, S, 6], got {tuple(wrench.shape)}")
+
+        if timestep_in_episode is not None and wrench.shape[1] >= 2:
+            startup_mask = timestep_in_episode == 0
+            if torch.any(startup_mask):
+                wrench = wrench.clone()
+                wrench[startup_mask, :-1, :] = wrench[startup_mask, 1:, :]
+                wrench[startup_mask, -1, :] = wrench[startup_mask, -2, :]
+
+        if wrench.shape[1:] == expected_shape:
+            return wrench
+        if wrench.shape[2:] != expected_shape[1:]:
+            raise ValueError(
+                f"FT wrench channel shape mismatch: got {tuple(wrench.shape[1:])}, expected {expected_shape}"
+            )
+        if wrench.shape[1] > expected_shape[0]:
+            return wrench[:, -expected_shape[0] :, :]
+        pad = expected_shape[0] - wrench.shape[1]
+        tail = wrench[:, -1:, :].repeat(1, pad, 1)
+        return torch.cat((wrench, tail), dim=1)
+
+    def _init_history(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        return {
+            key: value.unsqueeze(1).repeat(1, self._raw_key_horizons[key], *([1] * (value.ndim - 1)))
+            for key, value in obs.items()
+        }
+
+    def _update_history(self, obs: dict[str, torch.Tensor]):
+        for key, value in obs.items():
+            self._obs_histories[key] = torch.roll(self._obs_histories[key], shifts=-1, dims=1)
+            self._obs_histories[key][:, -1] = value
+
+    def _build_model_obs_dict(self) -> dict[str, torch.Tensor]:
+        obs_dict = {}
+        for key in [*self.rgb_keys, *self.low_dim_keys]:
+            history = self._obs_histories[key]
+            if key in self.wrench_keys:
+                history = _prepare_wrench_history_torch(history, self.negate_ft, self.ft_ma_window)
+            obs_dict[key] = history[:, -self.key_horizons[key] :]
+        return obs_dict
 
     @torch.inference_mode()
     def act(self, env) -> torch.Tensor:
-        images, state = self._build_current_obs(env)
-        if self._image_histories is None or self._state_history is None:
-            self._image_histories = {
-                key: value.unsqueeze(1).repeat(1, self.n_obs_steps, 1, 1, 1)
-                for key, value in images.items()
-            }
-            self._state_history = state.unsqueeze(1).repeat(1, self.n_obs_steps, 1)
+        obs = self._build_current_obs(env)
+        if self._obs_histories is None:
+            self._obs_histories = self._init_history(obs)
         else:
-            for key, value in images.items():
-                self._image_histories[key] = torch.roll(self._image_histories[key], shifts=-1, dims=1)
-                self._image_histories[key][:, -1] = value
-            self._state_history = torch.roll(self._state_history, shifts=-1, dims=1)
-            self._state_history[:, -1] = state
+            self._update_history(obs)
 
-        if self._action_plan is None or self._action_step >= self._action_plan.shape[1]:
-            obs_dict = {key: self._image_histories[key] for key in self.rgb_keys}
-            obs_dict["state"] = self._state_history
+        if self._action_plan is None or self._action_step >= self._current_plan_horizon():
+            obs_dict = self._build_model_obs_dict()
             result = self.model.predict_action(obs_dict)
             self._action_plan = result["action"]
             self._action_step = 0
@@ -372,6 +542,14 @@ class OfflineDiffusionInferencePolicy:
         action = self._action_plan[:, self._action_step]
         self._action_step += 1
         return action
+
+    def _current_plan_horizon(self) -> int:
+        if self._action_plan is None:
+            return 0
+        plan_horizon = int(self._action_plan.shape[1])
+        if self.max_action_plan_steps is None:
+            return plan_horizon
+        return min(plan_horizon, self.max_action_plan_steps)
 
 
 @hydra_task_config(args_cli.task, None)

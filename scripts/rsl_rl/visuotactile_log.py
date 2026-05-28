@@ -34,6 +34,36 @@ parser.add_argument(
     help="Enable random EE roll/pitch initialization with +/- this many degrees for tasks that support it.",
 )
 parser.add_argument(
+    "--fixed_eef_init",
+    action="store_true",
+    default=False,
+    help="Disable random EEF position/orientation initialization noise.",
+)
+parser.add_argument(
+    "--fixed_asset_yaw_deg",
+    type=float,
+    default=None,
+    help="Override the fixed asset nominal yaw in degrees.",
+)
+parser.add_argument(
+    "--fixed_asset_yaw_range_deg",
+    type=float,
+    default=None,
+    help="Override the fixed asset yaw randomization range in degrees. Use 0 for fixed yaw.",
+)
+parser.add_argument(
+    "--fixed_asset_height",
+    action="store_true",
+    default=False,
+    help="Disable fixed-asset Z-position randomization while keeping XY position randomization unchanged.",
+)
+parser.add_argument(
+    "--hand_init_height",
+    type=float,
+    default=None,
+    help="Override task.hand_init_pos[2] in meters while keeping the task's existing XY hand-init offsets.",
+)
+parser.add_argument(
     "--privileged_actor",
     action="store_true",
     default=False,
@@ -50,7 +80,10 @@ parser.add_argument(
     "--log_path",
     type=str,
     default=None,
-    help="Path to an HDF5 file for logging visuotactile rollout data. If omitted, logging is disabled.",
+    help=(
+        "Path to an HDF5 file for logging visuotactile rollout data. If only a filename is provided, "
+        "it is written under logs/vistac_rollouts. If omitted, logging is disabled."
+    ),
 )
 parser.add_argument(
     "--max_steps",
@@ -109,8 +142,29 @@ parser.add_argument(
 parser.add_argument(
     "--pre_action_wait_seconds",
     type=float,
-    default=1.0,
+    default=0.0,
     help="Hold the robot still for this many seconds at the start of each episode before running the policy.",
+)
+parser.add_argument(
+    "--physics_hz",
+    type=float,
+    default=120.0,
+    help="Physics stepping frequency for visuotactile logging. Policy/images/state remain at --policy_hz.",
+)
+parser.add_argument(
+    "--policy_hz",
+    type=float,
+    default=15.0,
+    help="Policy, image, and state logging frequency. Must divide --physics_hz.",
+)
+parser.add_argument(
+    "--ft_log_hz",
+    type=float,
+    default=None,
+    help=(
+        "Saved FT sampling frequency. Defaults to --physics_hz. Must divide --physics_hz "
+        "and be greater than or equal to --policy_hz."
+    ),
 )
 parser.add_argument(
     "--flush_partial_episodes_on_exit",
@@ -118,12 +172,44 @@ parser.add_argument(
     default=False,
     help="When stopping via max_steps/app close, flush in-progress (non-terminal) episode fragments to HDF5.",
 )
+parser.add_argument(
+    "--hide_held_asset",
+    action="store_true",
+    default=False,
+    help="Teleport the held asset far below each environment and keep it there. Useful for empty-gripper FT bias logs.",
+)
+parser.add_argument(
+    "--hold_finger_position",
+    action="store_true",
+    default=False,
+    help="Keep finger joint targets fixed at their current positions instead of commanding gripper close/open.",
+)
+parser.add_argument(
+    "--ft_grasp_width_control",
+    action="store_true",
+    default=False,
+    help=(
+        "After the reset-time grasp fit, override gripper commands with a fixed per-finger width "
+        "derived from the held-asset diameter. Intended for FR3 fingertip-FT experiments."
+    ),
+)
+parser.add_argument(
+    "--ft_grasp_width_scale",
+    type=float,
+    default=0.9,
+    help="Scale factor for fixed-width FT grasp control: commanded_width = (asset_diameter / 2) * scale.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
+if args_cli.hold_finger_position and args_cli.ft_grasp_width_control:
+    raise ValueError("--hold_finger_position and --ft_grasp_width_control are mutually exclusive.")
+if args_cli.ft_log_hz is not None:
+    if args_cli.ft_log_hz < args_cli.policy_hz:
+        raise ValueError("--ft_log_hz must be greater than or equal to --policy_hz.")
 task_name_cli = args_cli.task or ""
 is_visuo_task = ("Visuomotor" in task_name_cli) or ("Visuotactile" in task_name_cli)
 # always enable cameras to record video or visuotactile rollouts
@@ -146,6 +232,7 @@ import os
 import time
 import torch
 from tensordict import TensorDict
+import omni
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
@@ -170,6 +257,19 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import fr3_manipulation.tasks  # noqa: F401
 
 
+LEFT_FT_PRIM_PATH = "/World/fr3/fr3_left_ft_pad"
+RIGHT_FT_PRIM_PATH = "/World/fr3/fr3_right_ft_pad"
+ACTOR_XY_EVAL_NOISE_M = 0.005
+ACTOR_XY_EVAL_NOISE_STD_M = ACTOR_XY_EVAL_NOISE_M / 3.0
+FT_ATTR_CANDIDATES = (
+    "body_incoming_joint_wrench_b",
+    "state:force",
+    "state:linearForce",
+    "physxJoint:force",
+    "physxJoint:normalForce",
+)
+
+
 def _parse_env_ids(spec: str, num_envs: int, device: torch.device) -> torch.Tensor:
     """Parse a comma-separated env id list or 'all'."""
     if spec.lower() == "all":
@@ -190,6 +290,13 @@ def _tensor_to_numpy(value: torch.Tensor, env_ids: torch.Tensor | None = None, d
     if dtype is not None:
         array = array.astype(dtype)
     return array
+
+
+def _get_episode_success_rate(env) -> float | None:
+    """Return the ever-succeeded episode success rate tracked by the raw Factory env."""
+    if not hasattr(env, "ep_succeeded"):
+        return None
+    return float(torch.count_nonzero(env.ep_succeeded).float().item() / env.num_envs)
 
 
 def _append_h5_batch(h5_file: h5py.File, batch: dict[str, np.ndarray]):
@@ -262,6 +369,13 @@ def _format_duration(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def _resolve_log_path(log_path: str) -> str:
+    """Place bare visuotactile log filenames under the VISTAC rollout root."""
+    if os.path.isabs(log_path) or os.path.dirname(log_path):
+        return log_path
+    return os.path.join("logs", "vistac_rollouts", log_path)
+
+
 def _center_crop(image: torch.Tensor, crop_height: int, crop_width: int) -> torch.Tensor:
     """Crop an NHWC image tensor to a centered window while excluding the bottom artifact row."""
     height, width = image.shape[-3], image.shape[-2]
@@ -295,14 +409,278 @@ def _compute_teacher_policy_obs(base_env) -> torch.Tensor:
     )
 
 
+def _extract_force_vector(value) -> np.ndarray | None:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        try:
+            arr = np.asarray([float(v) for v in value], dtype=np.float32).reshape(-1)
+        except Exception:
+            return None
+        if arr.size >= 6:
+            return arr[:6]
+        if arr.size >= 3:
+            return np.concatenate([arr[:3], np.zeros(3, dtype=np.float32)], axis=0)
+        return None
+    if hasattr(value, "x") and hasattr(value, "y") and hasattr(value, "z"):
+        try:
+            return np.asarray([float(value.x), float(value.y), float(value.z), 0.0, 0.0, 0.0], dtype=np.float32)
+        except Exception:
+            return None
+    for attr_name in ("force", "linear", "linear_force"):
+        nested = getattr(value, attr_name, None)
+        if nested is not None:
+            vec = _extract_force_vector(nested)
+            if vec is not None:
+                return vec
+    for getter_name in ("GetForce", "GetLinear"):
+        getter = getattr(value, getter_name, None)
+        if callable(getter):
+            try:
+                vec = _extract_force_vector(getter())
+            except Exception:
+                vec = None
+            if vec is not None:
+                return vec
+    return None
+
+
+def _read_ft_wrench_from_prim(prim_path: str) -> np.ndarray | None:
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        return None
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        return None
+    for attr_name in FT_ATTR_CANDIDATES:
+        try:
+            attr = prim.GetAttribute(attr_name)
+            if not attr or not attr.IsValid():
+                continue
+            vec = _extract_force_vector(attr.Get())
+            if vec is not None:
+                return vec
+        except Exception:
+            continue
+    return None
+
+
+def _read_ft_wrenches_from_prim_paths(num_envs: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor] | None:
+    left = _read_ft_wrench_from_prim(LEFT_FT_PRIM_PATH)
+    right = _read_ft_wrench_from_prim(RIGHT_FT_PRIM_PATH)
+    if left is None or right is None:
+        return None
+    left_tensor = torch.from_numpy(left).to(device=device, dtype=torch.float32).unsqueeze(0).repeat(num_envs, 1)
+    right_tensor = torch.from_numpy(right).to(device=device, dtype=torch.float32).unsqueeze(0).repeat(num_envs, 1)
+    return left_tensor, right_tensor
+
+
+def _drop_startup_ft_substep(ft_wrench: torch.Tensor, timestep_in_episode: torch.Tensor) -> torch.Tensor:
+    """For episode-start rows, drop substep 0 by shifting substeps left and repeating the last sample."""
+    if ft_wrench is None or ft_wrench.ndim != 3 or ft_wrench.shape[1] < 2:
+        return ft_wrench
+    startup_mask = timestep_in_episode == 0
+    if not torch.any(startup_mask):
+        return ft_wrench
+    ft_wrench = ft_wrench.clone()
+    ft_wrench[startup_mask, :-1, :] = ft_wrench[startup_mask, 1:, :]
+    ft_wrench[startup_mask, -1, :] = ft_wrench[startup_mask, -2, :]
+    return ft_wrench
+
+
+def _downsample_ft_wrench(ft_wrench: torch.Tensor, physics_hz: float, ft_log_hz: float) -> torch.Tensor:
+    """Downsample per-physics-step FT samples while keeping simulator dt unchanged."""
+    if ft_wrench is None or ft_wrench.ndim != 3:
+        return ft_wrench
+    physics_hz = float(physics_hz)
+    ft_log_hz = float(ft_log_hz)
+    if ft_log_hz <= 0.0:
+        raise ValueError("--ft_log_hz must be positive.")
+    stride = physics_hz / ft_log_hz
+    stride_int = int(round(stride))
+    if abs(stride - stride_int) > 1.0e-6:
+        raise ValueError(f"--ft_log_hz must divide --physics_hz, got {ft_log_hz} vs {physics_hz}.")
+    if stride_int <= 1:
+        return ft_wrench
+    # Use the last sample in each stride-sized bin to keep a consistent causal sample timing.
+    start_idx = stride_int - 1
+    return ft_wrench[:, start_idx::stride_int, :]
+
+
 def _resolve_ft_body_indices(base_env) -> tuple[object, int, int]:
-    """Resolve the left/right FT body ids on the robot articulation."""
+    """Resolve fingertip link ids whose incoming fixed-joint wrench is used as FT."""
     robot = base_env.scene["robot"]
-    left_ids, _ = robot.find_bodies("fr3_left_ft")
-    right_ids, _ = robot.find_bodies("fr3_right_ft")
-    if len(left_ids) == 0 or len(right_ids) == 0:
-        raise ValueError("Could not resolve FT bodies 'fr3_left_ft' and 'fr3_right_ft' on scene['robot'].")
-    return robot, int(left_ids[0]), int(right_ids[0])
+    left_candidates = ("fr3_left_ft_pad",)
+    right_candidates = ("fr3_right_ft_pad",)
+    try:
+        left_name = next(name for name in left_candidates if name in robot.body_names)
+        right_name = next(name for name in right_candidates if name in robot.body_names)
+        left_id = robot.body_names.index(left_name)
+        right_id = robot.body_names.index(right_name)
+    except StopIteration as exc:
+        raise ValueError(
+            "Could not resolve fingertip FT bodies from "
+            f"{left_candidates} and {right_candidates}. "
+            f"Available bodies: {robot.body_names}"
+        ) from exc
+    return robot, left_id, right_id
+
+
+def _hide_held_asset(base_env):
+    """Move the held asset out of the workspace and zero its velocity."""
+    held_asset = getattr(base_env, "_held_asset", None)
+    if held_asset is None:
+        return
+    held_state = held_asset.data.default_root_state.clone()
+    held_state[:, 0:3] = base_env.scene.env_origins
+    held_state[:, 2] -= 10.0
+    held_state[:, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=base_env.device, dtype=held_state.dtype)
+    held_state[:, 7:] = 0.0
+    held_asset.write_root_pose_to_sim(held_state[:, 0:7])
+    held_asset.write_root_velocity_to_sim(held_state[:, 7:])
+    held_asset.reset()
+
+
+def _install_hold_finger_position(base_env):
+    """Patch gripper control so finger targets stay at the current joint positions."""
+    held_finger_pos = base_env._robot.data.joint_pos[:, 7:9].clone()
+    original_generate_ctrl_signals = base_env.generate_ctrl_signals
+
+    def _generate_ctrl_signals_hold_fingers(
+        ctrl_target_fingertip_midpoint_pos,
+        ctrl_target_fingertip_midpoint_quat,
+        ctrl_target_gripper_dof_pos,
+    ):
+        del ctrl_target_gripper_dof_pos
+        return original_generate_ctrl_signals(
+            ctrl_target_fingertip_midpoint_pos=ctrl_target_fingertip_midpoint_pos,
+            ctrl_target_fingertip_midpoint_quat=ctrl_target_fingertip_midpoint_quat,
+            ctrl_target_gripper_dof_pos=held_finger_pos,
+        )
+
+    base_env.generate_ctrl_signals = _generate_ctrl_signals_hold_fingers
+    return held_finger_pos
+
+
+def _install_fixed_grasp_width_control(base_env, width_scale: float):
+    """Patch gripper control to command a fixed post-grasp width derived from asset diameter."""
+    asset_diameter = float(base_env.cfg_task.held_asset_cfg.diameter)
+    commanded_width = float(asset_diameter * 0.5 * width_scale)
+    commanded_width_tensor = torch.full(
+        (base_env.num_envs, 2),
+        commanded_width,
+        device=base_env.device,
+        dtype=base_env._robot.data.joint_pos.dtype,
+    )
+    original_generate_ctrl_signals = base_env.generate_ctrl_signals
+
+    def _generate_ctrl_signals_fixed_grasp_width(
+        ctrl_target_fingertip_midpoint_pos,
+        ctrl_target_fingertip_midpoint_quat,
+        ctrl_target_gripper_dof_pos,
+    ):
+        del ctrl_target_gripper_dof_pos
+        return original_generate_ctrl_signals(
+            ctrl_target_fingertip_midpoint_pos=ctrl_target_fingertip_midpoint_pos,
+            ctrl_target_fingertip_midpoint_quat=ctrl_target_fingertip_midpoint_quat,
+            ctrl_target_gripper_dof_pos=commanded_width_tensor,
+        )
+
+    base_env.generate_ctrl_signals = _generate_ctrl_signals_fixed_grasp_width
+    return commanded_width
+
+
+def _apply_factory_init_overrides(env_cfg):
+    task_cfg = getattr(env_cfg, "task", None)
+    if task_cfg is None:
+        return
+
+    if args_cli.hand_init_height is not None and hasattr(task_cfg, "hand_init_pos"):
+        hand_init_pos = list(task_cfg.hand_init_pos)
+        if len(hand_init_pos) < 3:
+            raise ValueError("task.hand_init_pos must have at least 3 elements [x, y, z].")
+        hand_init_pos[2] = float(args_cli.hand_init_height)
+        task_cfg.hand_init_pos = hand_init_pos
+        print(f"[INFO] Hand-init height override set to {task_cfg.hand_init_pos[2]:.4f} m.")
+
+    if args_cli.fixed_eef_init:
+        task_cfg.hand_init_pos_noise = [0.0, 0.0, 0.0]
+        task_cfg.hand_init_orn_noise = [0.0, 0.0, 0.0]
+        if hasattr(task_cfg, "randomize_hand_init_tilt"):
+            task_cfg.randomize_hand_init_tilt = False
+        print("[INFO] Fixed EEF init enabled: zeroed hand init position/orientation noise.")
+
+    if args_cli.fixed_asset_yaw_deg is not None:
+        task_cfg.fixed_asset_init_orn_deg = float(args_cli.fixed_asset_yaw_deg)
+        print(f"[INFO] Fixed asset nominal yaw set to {task_cfg.fixed_asset_init_orn_deg:.2f} deg.")
+
+    if args_cli.fixed_asset_yaw_range_deg is not None:
+        task_cfg.fixed_asset_init_orn_range_deg = float(args_cli.fixed_asset_yaw_range_deg)
+        print(f"[INFO] Fixed asset yaw range set to {task_cfg.fixed_asset_init_orn_range_deg:.2f} deg.")
+
+    if args_cli.fixed_asset_height and hasattr(task_cfg, "fixed_asset_init_pos_noise"):
+        pos_noise = list(task_cfg.fixed_asset_init_pos_noise)
+        if len(pos_noise) < 3:
+            raise ValueError("task.fixed_asset_init_pos_noise must have at least 3 elements [x, y, z].")
+        pos_noise[2] = 0.0
+        task_cfg.fixed_asset_init_pos_noise = pos_noise
+        print("[INFO] Fixed asset height enabled: zeroed fixed-asset Z-position randomization noise.")
+
+
+def _override_actor_target_xy_noise_for_eval(env_cfg):
+    """Use fixed actor-side XY target noise for student-style evaluation/logging."""
+    curriculum_cfg = getattr(env_cfg, "actor_target_perturb_curriculum", None)
+    if curriculum_cfg is None or args_cli.privileged_actor:
+        return
+    curriculum_cfg.enabled = True
+    curriculum_cfg.start_xy_noise_m = ACTOR_XY_EVAL_NOISE_M
+    curriculum_cfg.end_xy_noise_m = ACTOR_XY_EVAL_NOISE_M
+    curriculum_cfg.total_steps = 1
+    print("[INFO] Actor target XY noise override enabled: clipped Gaussian reset noise in x,y within +/- 5.0 mm.")
+
+
+def _install_gaussian_actor_xy_noise(base_env):
+    """Replace actor XY reset noise with clipped Gaussian samples."""
+    if args_cli.privileged_actor or not hasattr(base_env, "_pre_physics_step"):
+        return
+    if not hasattr(base_env, "actor_held_xy_offset") or not hasattr(base_env, "cfg"):
+        return
+
+    original_pre_physics_step = base_env._pre_physics_step
+
+    def _pre_physics_step_gaussian_actor_noise(action):
+        env_ids = base_env.reset_buf.nonzero(as_tuple=False).squeeze(-1)
+        original_pre_physics_step(action)
+        if len(env_ids) == 0:
+            return
+        curriculum_cfg = getattr(base_env.cfg, "actor_target_perturb_curriculum", None)
+        if curriculum_cfg is None or not curriculum_cfg.enabled or base_env.current_actor_xy_noise <= 0.0:
+            return
+        xy_noise = torch.randn((len(env_ids), 2), device=base_env.device) * ACTOR_XY_EVAL_NOISE_STD_M
+        xy_noise = torch.clamp(xy_noise, -ACTOR_XY_EVAL_NOISE_M, ACTOR_XY_EVAL_NOISE_M)
+        base_env.actor_held_xy_offset[env_ids] = xy_noise
+        if hasattr(base_env, "last_actor_held_xy_offset"):
+            base_env.last_actor_held_xy_offset[env_ids] = xy_noise
+
+    base_env._pre_physics_step = _pre_physics_step_gaussian_actor_noise
+    print("[INFO] Actor target XY noise sampler override enabled: Gaussian with clipping at +/- 5.0 mm.")
+
+
+def _apply_multirate_timing(env_cfg):
+    physics_hz = float(args_cli.physics_hz)
+    policy_hz = float(args_cli.policy_hz)
+    if physics_hz <= 0.0 or policy_hz <= 0.0:
+        raise ValueError("--physics_hz and --policy_hz must be positive.")
+    decimation = physics_hz / policy_hz
+    decimation_int = int(round(decimation))
+    if abs(decimation - decimation_int) > 1.0e-6:
+        raise ValueError(f"--physics_hz must be divisible by --policy_hz, got {physics_hz} / {policy_hz}.")
+    env_cfg.sim.dt = 1.0 / physics_hz
+    env_cfg.decimation = decimation_int
+    print(
+        f"[INFO] Multirate timing: physics={physics_hz:.1f} Hz, "
+        f"policy/log={policy_hz:.1f} Hz, decimation={decimation_int}."
+    )
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -318,6 +696,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.random_orn is not None and hasattr(env_cfg, "task") and hasattr(env_cfg.task, "randomize_hand_init_tilt"):
         env_cfg.task.randomize_hand_init_tilt = True
         env_cfg.task.hand_init_tilt_noise_deg = args_cli.random_orn
+    _apply_factory_init_overrides(env_cfg)
+    _override_actor_target_xy_noise_for_eval(env_cfg)
+    _apply_multirate_timing(env_cfg)
     if args_cli.privileged_actor:
         agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
 
@@ -325,8 +706,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
-    if args_cli.no_log_images and hasattr(env_cfg, "wrist_camera"):
-        env_cfg.wrist_camera = None
+    if args_cli.no_log_images:
+        if hasattr(env_cfg, "wrist_camera"):
+            env_cfg.wrist_camera = None
+        if hasattr(env_cfg, "side_view_camera"):
+            env_cfg.side_view_camera = None
     elif hasattr(env_cfg, "scene") and hasattr(env_cfg.scene, "clone_in_fabric"):
         env_cfg.scene.clone_in_fabric = False
 
@@ -352,7 +736,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     base_env = env.unwrapped
+    _install_gaussian_actor_xy_noise(base_env)
     robot, left_ft_body_idx, right_ft_body_idx = _resolve_ft_body_indices(base_env)
+    if args_cli.hide_held_asset:
+        _hide_held_asset(base_env)
+        print("[INFO] Hidden held asset enabled: moved held asset below each environment.")
 
     if agent_cfg.class_name == "DistillationRunner":
         if args_cli.task is None:
@@ -446,15 +834,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     total_samples_written = 0
     total_episodes_finished = 0
     total_successful_episodes_written = 0
+    completed_episode_success_rates: list[float] = []
+    printed_ft_source_info = False
     if not (0.0 <= args_cli.action_smoothing_alpha <= 1.0):
         raise ValueError("--action_smoothing_alpha must be in [0, 1].")
     if args_cli.action_scale <= 0.0:
         raise ValueError("--action_scale must be > 0.")
     last_actions = None
     if args_cli.log_path:
-        os.makedirs(os.path.dirname(os.path.abspath(args_cli.log_path)), exist_ok=True)
-        h5_file = h5py.File(args_cli.log_path, "w")
+        log_path = _resolve_log_path(args_cli.log_path)
+        os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
+        h5_file = h5py.File(log_path, "w")
         log_env_ids = _parse_env_ids(args_cli.log_env_ids, base_env.num_envs, base_env.device)
+        ft_log_hz = float(args_cli.ft_log_hz) if args_cli.ft_log_hz is not None else float(args_cli.physics_hz)
         timestep_in_episode = torch.zeros(base_env.num_envs, dtype=torch.int64, device=base_env.device)
         episode_id_in_env = torch.zeros(base_env.num_envs, dtype=torch.int64, device=base_env.device)
         episode_rows = {int(env_id): [] for env_id in log_env_ids.detach().cpu().tolist()}
@@ -476,17 +868,43 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         h5_file.attrs["successful_episodes_target"] = args_cli.successful_episodes_target
         h5_file.attrs["success_tail_seconds"] = args_cli.success_tail_seconds
         h5_file.attrs["pre_action_wait_seconds"] = args_cli.pre_action_wait_seconds
-        h5_file.attrs["left_ft_body_name"] = "fr3_left_ft"
-        h5_file.attrs["right_ft_body_name"] = "fr3_right_ft"
         h5_file.attrs["ft_wrench_order"] = "fx,fy,fz,tx,ty,tz"
+        h5_file.attrs["physics_hz"] = args_cli.physics_hz
+        h5_file.attrs["policy_hz"] = args_cli.policy_hz
+        h5_file.attrs["ft_log_hz"] = ft_log_hz
+        h5_file.attrs["ft_samples_per_policy_step"] = int(round(ft_log_hz / float(args_cli.policy_hz)))
+        h5_file.attrs["ft_layout"] = "per_policy_step_substeps"
+        h5_file.attrs["ft_prim_paths"] = np.asarray([LEFT_FT_PRIM_PATH, RIGHT_FT_PRIM_PATH], dtype="S")
         h5_file.attrs["episode_layout"] = "contiguous_per_env_episode"
         h5_file.attrs["wrist_rgb_resolution"] = np.asarray([rgb_crop_width, rgb_crop_height], dtype=np.int64)
+        h5_file.attrs["side_view_rgb_resolution"] = np.asarray([rgb_crop_width, rgb_crop_height], dtype=np.int64)
         h5_file.attrs["replay_center_crop"] = "216x216"
-        print(f"[INFO] Visuotactile rollout HDF5 log: {os.path.abspath(args_cli.log_path)}")
+        print(f"[INFO] Visuotactile rollout HDF5 log: {os.path.abspath(log_path)}")
         print(f"[INFO] Logging env ids: {h5_file.attrs['logged_env_ids'].tolist()}")
 
     # reset environment
     obs = env.get_observations()
+    if args_cli.hold_finger_position:
+        held_finger_pos = _install_hold_finger_position(base_env)
+        print(
+            "[INFO] Hold finger position enabled after reset-time grasp: "
+            f"target={held_finger_pos[0].detach().cpu().tolist()}.",
+        )
+    if args_cli.ft_grasp_width_control:
+        body_names = tuple(getattr(base_env._robot, "body_names", []) or [])
+        ft_body_candidates = ("fr3_left_ft_pad", "fr3_right_ft_pad")
+        if not all(name in body_names for name in ft_body_candidates):
+            print(
+                "[WARN] FT grasp-width control requested, but not all fingertip FT pad bodies were found. "
+                f"Expected {ft_body_candidates}, available bodies: {body_names}",
+            )
+        commanded_width = _install_fixed_grasp_width_control(base_env, args_cli.ft_grasp_width_scale)
+        print(
+            "[INFO] Fixed FT grasp-width control enabled after reset-time grasp: "
+            f"per_finger_width={commanded_width:.6f} m "
+            f"(diameter={float(base_env.cfg_task.held_asset_cfg.diameter):.6f} m, "
+            f"scale={float(args_cli.ft_grasp_width_scale):.3f}).",
+        )
     timestep = 0
     try:
         # simulate environment
@@ -521,6 +939,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 last_actions = actions
                 # env stepping
                 obs, _, dones, extras = env.step(actions)
+                if args_cli.hide_held_asset:
+                    _hide_held_asset(base_env)
                 # reset recurrent states for episodes that have terminated
                 policy_nn.reset(dones)
 
@@ -528,8 +948,43 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     dones_mask = dones.to(dtype=torch.bool)
                     timeout = _get_timeout_tensor(extras, dones_mask)
                     gripper_pos = torch.mean(base_env.joint_pos[:, 7:], dim=1, keepdim=True)
-                    left_ft_wrench = robot.data.body_incoming_joint_wrench_b[:, left_ft_body_idx]
-                    right_ft_wrench = robot.data.body_incoming_joint_wrench_b[:, right_ft_body_idx]
+                    ft_from_prim_paths = _read_ft_wrenches_from_prim_paths(base_env.num_envs, base_env.device)
+                    if ft_from_prim_paths is not None:
+                        left_ft_wrench, right_ft_wrench = ft_from_prim_paths
+                        if not printed_ft_source_info:
+                            print(
+                                "[INFO] FT logging source: prim paths "
+                                f"('{LEFT_FT_PRIM_PATH}', '{RIGHT_FT_PRIM_PATH}').",
+                            )
+                            printed_ft_source_info = True
+                    else:
+                        left_ft_wrench = getattr(base_env, "left_ft_wrench_substeps", None)
+                        right_ft_wrench = getattr(base_env, "right_ft_wrench_substeps", None)
+                        if left_ft_wrench is not None and right_ft_wrench is not None and not printed_ft_source_info:
+                            body_names = getattr(robot, "body_names", [])
+                            left_body_name = body_names[left_ft_body_idx] if left_ft_body_idx < len(body_names) else left_ft_body_idx
+                            right_body_name = body_names[right_ft_body_idx] if right_ft_body_idx < len(body_names) else right_ft_body_idx
+                            print(
+                                "[INFO] FT logging source: env substep body_incoming_joint_wrench_b "
+                                f"(left={left_body_name}, right={right_body_name}).",
+                            )
+                            printed_ft_source_info = True
+                    if left_ft_wrench is None or right_ft_wrench is None:
+                        left_ft_wrench = robot.data.body_incoming_joint_wrench_b[:, left_ft_body_idx]
+                        right_ft_wrench = robot.data.body_incoming_joint_wrench_b[:, right_ft_body_idx]
+                        if not printed_ft_source_info:
+                            body_names = getattr(robot, "body_names", [])
+                            left_body_name = body_names[left_ft_body_idx] if left_ft_body_idx < len(body_names) else left_ft_body_idx
+                            right_body_name = body_names[right_ft_body_idx] if right_ft_body_idx < len(body_names) else right_ft_body_idx
+                            print(
+                                "[INFO] FT logging source: robot.data.body_incoming_joint_wrench_b "
+                                f"(left={left_body_name}, right={right_body_name}).",
+                            )
+                            printed_ft_source_info = True
+                    left_ft_wrench = _drop_startup_ft_substep(left_ft_wrench, timestep_in_episode)
+                    right_ft_wrench = _drop_startup_ft_substep(right_ft_wrench, timestep_in_episode)
+                    left_ft_wrench = _downsample_ft_wrench(left_ft_wrench, args_cli.physics_hz, ft_log_hz)
+                    right_ft_wrench = _downsample_ft_wrench(right_ft_wrench, args_cli.physics_hz, ft_log_hz)
                     env_id_batch = _tensor_to_numpy(log_env_ids, dtype=np.int64)
                     batch = {
                         "env_id": env_id_batch,
@@ -556,6 +1011,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             wrist_rgb = wrist_rgb.to(torch.uint8)
                         wrist_rgb = _center_crop(wrist_rgb, rgb_crop_height, rgb_crop_width)
                         batch["wrist_rgb"] = _tensor_to_numpy(wrist_rgb, log_env_ids)
+                        if not hasattr(base_env, "_side_view_camera"):
+                            raise AttributeError(
+                                "The env has no _side_view_camera. Use a visuotactile task with side view or pass --no_log_images."
+                            )
+                        side_view_rgb = base_env._side_view_camera.data.output["rgb"][..., :3]
+                        if side_view_rgb.dtype.is_floating_point:
+                            side_view_rgb = torch.clamp(side_view_rgb * 255.0, 0.0, 255.0).to(torch.uint8)
+                        else:
+                            side_view_rgb = side_view_rgb.to(torch.uint8)
+                        side_view_rgb = _center_crop(side_view_rgb, rgb_crop_height, rgb_crop_width)
+                        batch["side_view_rgb"] = _tensor_to_numpy(side_view_rgb, log_env_ids)
                     if args_cli.log_success_only:
                         active_mask = ~suppress_after_success[log_env_ids].detach().cpu().numpy()
                         if np.any(active_mask):
@@ -606,6 +1072,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             if len(ready_env_ids) > 0:
                                 h5_file.flush()
                     if torch.any(dones_mask):
+                        episode_success_rate_value = _get_episode_success_rate(base_env)
+                        final_success_rate_value = None
+                        if isinstance(extras, dict) and "successes" in extras:
+                            final_success_rate_value = extras["successes"]
+                            if isinstance(final_success_rate_value, torch.Tensor):
+                                final_success_rate_value = float(final_success_rate_value.item())
+                        if episode_success_rate_value is not None:
+                            completed_episode_success_rates.append(float(episode_success_rate_value))
+                        if episode_success_rate_value is not None or final_success_rate_value is not None:
+                            episode_text = (
+                                f"episode success rate = {float(episode_success_rate_value):.4f}"
+                                if episode_success_rate_value is not None
+                                else "episode success rate = unavailable"
+                            )
+                            final_text = (
+                                f"final-step success rate = {float(final_success_rate_value):.4f}"
+                                if final_success_rate_value is not None
+                                else "final-step success rate = unavailable"
+                            )
+                            print(f"[INFO] Episode end at step {timestep}: {episode_text}, {final_text}")
                         total_episodes_finished += int(torch.count_nonzero(dones_mask).item())
                         if last_actions is not None:
                             last_actions[dones_mask] = 0.0
@@ -655,11 +1141,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 ]
                 if args_cli.log_success_only:
                     status_parts.append(f"successful_episodes={total_successful_episodes_written}")
-                if "successes" in extras:
-                    success_value = extras["successes"]
-                    if isinstance(success_value, torch.Tensor):
-                        success_value = float(success_value.item())
-                    status_parts.append(f"success={success_value:.4f}")
                 if args_cli.max_steps > 0 and rate > 0:
                     remaining_steps = args_cli.max_steps - timestep
                     eta = remaining_steps / rate
@@ -691,6 +1172,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     h5_file.flush()
                     print(f"[INFO] Flushed {partial_written} rows of partial episode data on exit.")
             h5_file.close()
+
+    if completed_episode_success_rates:
+        mean_episode_success_rate = sum(completed_episode_success_rates) / len(completed_episode_success_rates)
+        print(
+            "[INFO] Mean episode success rate over "
+            f"{len(completed_episode_success_rates)} completed episode(s): {mean_episode_success_rate:.4f}"
+        )
 
     # close the simulator
     env.close()

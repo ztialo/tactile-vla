@@ -1,0 +1,59 @@
+name: gear_mesh_vision_wrist_sideview
+
+dataset_path: logs/vistac_rollouts/gear_mesh_200success_vistac_timmft_teacher397_fixedeef_fixedheight_8cm.h5
+
+sparse_obs_rgb_horizon: 2
+sparse_obs_rgb_down_sample_steps: 1
+sparse_obs_state_horizon: 2
+sparse_obs_state_down_sample_steps: 1
+sparse_action_horizon: 16
+sparse_action_down_sample_steps: 1
+
+shape_meta: &shape_meta
+  obs:
+    wrist:
+      shape: [3, 224, 224]
+      type: rgb
+    side_view:
+      shape: [3, 224, 224]
+      type: rgb
+    state:
+      shape: [8]
+      type: low_dim
+  action:
+    shape: [6]
+  sample:
+    obs:
+      sparse:
+        wrist:
+          horizon: ${task.sparse_obs_rgb_horizon}
+          down_sample_steps: ${task.sparse_obs_rgb_down_sample_steps}
+        side_view:
+          horizon: ${task.sparse_obs_rgb_horizon}
+          down_sample_steps: ${task.sparse_obs_rgb_down_sample_steps}
+        state:
+          horizon: ${task.sparse_obs_state_horizon}
+          down_sample_steps: ${task.sparse_obs_state_down_sample_steps}
+    action:
+      sparse:
+        horizon: ${task.sparse_action_horizon}
+        down_sample_steps: ${task.sparse_action_down_sample_steps}
+
+env_runner:
+  _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner
+
+dataset:
+  _target_: diffusion_policy.dataset.isaaclab_hdf5_image_dataset.IsaacLabHdf5ImageDataset
+  shape_meta: *shape_meta
+  dataset_path: ${task.dataset_path}
+  horizon: ${task.sparse_action_horizon}
+  pad_before: 0
+  pad_after: 0
+  n_obs_steps: ${task.sparse_obs_rgb_horizon}
+  val_ratio: 0.1
+  seed: 42
+  max_train_episodes: null
+  max_val_episodes: null
+  image_crop_size: 224
+  use_ft: false
+  rotation_rep: raw

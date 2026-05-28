@@ -215,6 +215,11 @@ class FactoryEnv(DirectRLEnv):
         self.left_finger_body_idx = self._get_body_index("panda_leftfinger", "fr3_leftfinger")
         self.right_finger_body_idx = self._get_body_index("panda_rightfinger", "fr3_rightfinger")
         self.fingertip_body_idx = self._get_body_index("panda_fingertip_centered", "fr3_hand_tcp", "fr3_hand")
+        self.left_ft_body_idx = self._get_body_index("fr3_left_ft_pad", "fr3_left_ft_base", "fr3_left_ft")
+        self.right_ft_body_idx = self._get_body_index("fr3_right_ft_pad", "fr3_right_ft_base", "fr3_right_ft")
+        self.left_ft_wrench_substeps = torch.zeros((self.num_envs, self.cfg.decimation, 6), device=self.device)
+        self.right_ft_wrench_substeps = torch.zeros((self.num_envs, self.cfg.decimation, 6), device=self.device)
+        self.ft_substep_idx = 0
 
         # Tensors for finite-differencing.
         self.last_update_timestamp = 0.0  # Note: This is for finite differencing body velocities.
@@ -223,6 +228,8 @@ class FactoryEnv(DirectRLEnv):
             torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
         )
         self.prev_joint_pos = torch.zeros((self.num_envs, 7), device=self.device)
+        self.actor_held_xy_offset = torch.zeros((self.num_envs, 2), device=self.device)
+        self.last_actor_held_xy_offset = torch.zeros((self.num_envs, 2), device=self.device)
 
         self.ep_succeeded = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
         self.ep_success_times = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
@@ -246,6 +253,7 @@ class FactoryEnv(DirectRLEnv):
 
         self._robot = Articulation(self.cfg.robot)
         self._wrist_camera = TiledCamera(self.cfg.wrist_camera) if self.cfg.wrist_camera is not None else None
+        self._side_view_camera = TiledCamera(self.cfg.side_view_camera) if self.cfg.side_view_camera is not None else None
         self._fixed_asset = Articulation(self.cfg_task.fixed_asset)
         self._held_asset = Articulation(self.cfg_task.held_asset)
         if self.cfg_task.name == "gear_mesh":
@@ -260,6 +268,8 @@ class FactoryEnv(DirectRLEnv):
         self.scene.articulations["robot"] = self._robot
         if self._wrist_camera is not None:
             self.scene.sensors["wrist_camera"] = self._wrist_camera
+        if self._side_view_camera is not None:
+            self.scene.sensors["side_view_camera"] = self._side_view_camera
         self.scene.articulations["fixed_asset"] = self._fixed_asset
         self.scene.articulations["held_asset"] = self._held_asset
         if self.cfg_task.name == "gear_mesh":
@@ -341,9 +351,18 @@ class FactoryEnv(DirectRLEnv):
         }
         return state_dict
 
+    def _get_noisy_actor_state_dict(self, state_dict):
+        """Actor-only privileged-style state with consistent XY target perturbation."""
+        noisy_state_dict = {key: value.clone() if torch.is_tensor(value) else value for key, value in state_dict.items()}
+        if self.cfg.actor_target_perturb_curriculum.enabled:
+            noisy_state_dict["held_pos"][:, 0:2] += self.actor_held_xy_offset
+            noisy_state_dict["held_pos_rel_fixed"][:, 0:2] += self.actor_held_xy_offset
+        return noisy_state_dict
+
     def _get_observations(self):
         """Get actor/critic inputs using asymmetric critic."""
         state_dict = self._get_factory_obs_state_dict()
+        noisy_state_dict = self._get_noisy_actor_state_dict(state_dict)
 
         gripper_pos = torch.mean(self.joint_pos[:, 7:], dim=1, keepdim=True)
         proprio = torch.cat((self.joint_pos[:, 0:7], gripper_pos, self.prev_action_obs), dim=-1)
@@ -355,6 +374,7 @@ class FactoryEnv(DirectRLEnv):
             image_embedding = torch.zeros((self.num_envs, IMAGE_EMBED_DIM), device=self.device)
         obs_tensors = torch.cat((image_embedding, proprio), dim=-1)
         state_tensors = factory_utils.collapse_obs_dict(state_dict, self.cfg.state_order + ["prev_actions"])
+        noisy_actor_state_tensors = factory_utils.collapse_obs_dict(noisy_state_dict, self.cfg.state_order + ["prev_actions"])
         noisy_fixed_pos = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
         teacher_policy_tensors = torch.cat(
             (
@@ -366,20 +386,61 @@ class FactoryEnv(DirectRLEnv):
             ),
             dim=-1,
         )
-        return {"policy": obs_tensors, "critic": state_tensors, "teacher_policy": teacher_policy_tensors}
+        return {
+            "policy": obs_tensors,
+            "critic": state_tensors,
+            "teacher_policy": teacher_policy_tensors,
+            "policy_actor_noisy": noisy_actor_state_tensors,
+        }
 
     def _reset_buffers(self, env_ids):
         """Reset buffers."""
         self.ep_succeeded[env_ids] = 0
         self.ep_success_times[env_ids] = 0
+        self.actor_held_xy_offset[env_ids] = 0.0
+
+    def _update_actor_target_perturb_curriculum(self, force: bool = False):
+        curriculum_cfg = self.cfg.actor_target_perturb_curriculum
+        if not curriculum_cfg.enabled:
+            self.current_actor_xy_noise = 0.0
+            return
+
+        total_steps = max(int(curriculum_cfg.total_steps), 1)
+        progress = min(max(float(self.common_step_counter) / float(total_steps), 0.0), 1.0)
+        current_noise = curriculum_cfg.start_xy_noise_m + progress * (
+            curriculum_cfg.end_xy_noise_m - curriculum_cfg.start_xy_noise_m
+        )
+        if (not force) and abs(current_noise - getattr(self, "current_actor_xy_noise", 0.0)) < 1.0e-8:
+            return
+        self.current_actor_xy_noise = current_noise
 
     def _pre_physics_step(self, action):
         """Apply policy actions with smoothing."""
         env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
+        self._update_actor_target_perturb_curriculum()
         if len(env_ids) > 0:
             self._reset_buffers(env_ids)
+            if self.cfg.actor_target_perturb_curriculum.enabled and self.current_actor_xy_noise > 0.0:
+                xy_noise = (2.0 * torch.rand((len(env_ids), 2), device=self.device) - 1.0) * self.current_actor_xy_noise
+                self.actor_held_xy_offset[env_ids] = xy_noise
+                self.last_actor_held_xy_offset[env_ids] = xy_noise
 
+        self.ft_substep_idx = 0
+        self.left_ft_wrench_substeps.zero_()
+        self.right_ft_wrench_substeps.zero_()
         self.actions = self.ema_factor * action.clone().to(self.device) + (1 - self.ema_factor) * self.actions
+
+    def _record_ft_substep(self):
+        """Record one physics-rate FT sample during the decimation loop."""
+        if self.ft_substep_idx >= self.left_ft_wrench_substeps.shape[1]:
+            return
+        self.left_ft_wrench_substeps[:, self.ft_substep_idx] = self._robot.data.body_incoming_joint_wrench_b[
+            :, self.left_ft_body_idx
+        ]
+        self.right_ft_wrench_substeps[:, self.ft_substep_idx] = self._robot.data.body_incoming_joint_wrench_b[
+            :, self.right_ft_body_idx
+        ]
+        self.ft_substep_idx += 1
 
     def close_gripper_in_place(self):
         """Keep gripper in current position as gripper closes."""
@@ -413,10 +474,11 @@ class FactoryEnv(DirectRLEnv):
             roll=target_euler_xyz[:, 0], pitch=target_euler_xyz[:, 1], yaw=target_euler_xyz[:, 2]
         )
 
+        grasp_close_width = self.cfg_task.held_asset_cfg.diameter / 2.0 * 0.875
         self.generate_ctrl_signals(
             ctrl_target_fingertip_midpoint_pos=ctrl_target_fingertip_midpoint_pos,
             ctrl_target_fingertip_midpoint_quat=ctrl_target_fingertip_midpoint_quat,
-            ctrl_target_gripper_dof_pos=0.0,
+            ctrl_target_gripper_dof_pos=grasp_close_width,
         )
 
     def _apply_action(self):
@@ -425,6 +487,7 @@ class FactoryEnv(DirectRLEnv):
         # Check if we need to re-compute velocities within the decimation loop.
         if self.last_update_timestamp < self._robot._data._sim_timestamp:
             self._compute_intermediate_values(dt=self.physics_dt)
+        self._record_ft_substep()
 
         # Interpret actions as target pos displacements and set pos target
         pos_actions = self.actions[:, 0:3] * self.pos_threshold
@@ -464,10 +527,11 @@ class FactoryEnv(DirectRLEnv):
             roll=target_euler_xyz[:, 0], pitch=target_euler_xyz[:, 1], yaw=target_euler_xyz[:, 2]
         )
 
+        grasp_close_width = self.cfg_task.held_asset_cfg.diameter / 2.0 * 0.875
         self.generate_ctrl_signals(
             ctrl_target_fingertip_midpoint_pos=ctrl_target_fingertip_midpoint_pos,
             ctrl_target_fingertip_midpoint_quat=ctrl_target_fingertip_midpoint_quat,
-            ctrl_target_gripper_dof_pos=0.0,
+            ctrl_target_gripper_dof_pos=grasp_close_width,
         )
 
     def generate_ctrl_signals(
@@ -749,6 +813,7 @@ class FactoryEnv(DirectRLEnv):
             held_asset_relative_pos[:, 0] += gear_base_offset[0]
             held_asset_relative_pos[:, 2] += gear_base_offset[2]
             held_asset_relative_pos[:, 2] += self.cfg_task.held_asset_cfg.height / 2.0 * 1.1
+            held_asset_relative_pos[:, 2] += self.cfg_task.held_asset_grasp_z_offset
         elif self.cfg_task.name == "nut_thread":
             held_asset_relative_pos = factory_utils.get_held_base_pos_local(
                 self.cfg_task.name, self.cfg_task.fixed_asset_cfg, self.num_envs, self.device
@@ -982,8 +1047,9 @@ class FactoryEnv(DirectRLEnv):
         self.step_sim_no_action()
 
         grasp_time = 0.0
+        grasp_close_width = self.cfg_task.held_asset_cfg.diameter / 2.0 * 0.875
         while grasp_time < 0.25:
-            self.ctrl_target_joint_pos[env_ids, 7:] = 0.0  # Close gripper.
+            self.ctrl_target_joint_pos[env_ids, 7:] = grasp_close_width  # Close around the asset without full closure.
             self.close_gripper_in_place()
             self.step_sim_no_action()
             grasp_time += self.sim.get_physics_dt()

@@ -53,6 +53,12 @@ parser.add_argument(
     help="Disable fixed-asset Z-position randomization while keeping XY position randomization unchanged.",
 )
 parser.add_argument(
+    "--pre_action_wait_seconds",
+    type=float,
+    default=0.0,
+    help="Hold the robot still for this many seconds at the start of each episode before applying policy actions.",
+)
+parser.add_argument(
     "--privileged_actor",
     action="store_true",
     default=False,
@@ -209,6 +215,20 @@ def _initialize_actor_from_offline_bc(runner, checkpoint_path: str):
     print(f"[INFO] Initialized PPO actor MLP from offline BC checkpoint: {checkpoint_path}")
 
 
+def _initialize_actor_critic_from_teacher_checkpoint(runner, checkpoint_path: str):
+    """Initialize PPO actor-critic weights and normalizers from an existing RSL-RL checkpoint."""
+    checkpoint = torch.load(checkpoint_path, map_location=runner.device)
+    model_state_dict = checkpoint["model_state_dict"]
+    if hasattr(runner.alg, "policy"):
+        module = runner.alg.policy
+    elif hasattr(runner.alg, "actor_critic"):
+        module = runner.alg.actor_critic
+    else:
+        raise AttributeError("Could not find PPO policy module on runner.alg (expected policy or actor_critic).")
+    module.load_state_dict(model_state_dict, strict=True)
+    print(f"[INFO] Initialized PPO actor-critic from teacher checkpoint: {checkpoint_path}")
+
+
 def _apply_factory_init_overrides(env_cfg):
     task_cfg = getattr(env_cfg, "task", None)
     if task_cfg is None:
@@ -253,8 +273,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _apply_factory_init_overrides(env_cfg)
     if args_cli.privileged_actor:
         agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
+    if hasattr(env_cfg, "pre_action_wait_seconds"):
+        env_cfg.pre_action_wait_seconds = float(args_cli.pre_action_wait_seconds)
     if hasattr(env_cfg, "action_slowdown_curriculum") and getattr(env_cfg.action_slowdown_curriculum, "enabled", False):
         env_cfg.action_slowdown_curriculum.total_steps = agent_cfg.max_iterations * agent_cfg.num_steps_per_env
+    if hasattr(env_cfg, "actor_target_perturb_curriculum") and getattr(env_cfg.actor_target_perturb_curriculum, "enabled", False):
+        env_cfg.actor_target_perturb_curriculum.total_steps = agent_cfg.max_iterations * agent_cfg.num_steps_per_env
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
@@ -348,14 +372,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # write git state to logs
     runner.add_git_repo_to_log(__file__)
     # load the checkpoint
-    if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
+    did_resume = agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation"
+    if did_resume:
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         # load previously trained model
         runner.load(resume_path)
-    if agent_cfg.algorithm.class_name == "Distillation" and getattr(agent_cfg, "student_init_checkpoint", ""):
+    if (
+        not agent_cfg.resume
+        and agent_cfg.algorithm.class_name == "Distillation"
+        and getattr(agent_cfg, "student_init_checkpoint", "")
+    ):
         _initialize_distillation_student_from_offline_bc(runner, agent_cfg.student_init_checkpoint)
-    elif agent_cfg.class_name == "OnPolicyRunner" and getattr(agent_cfg, "student_init_checkpoint", ""):
+    elif not agent_cfg.resume and agent_cfg.class_name == "OnPolicyRunner" and getattr(agent_cfg, "student_init_checkpoint", ""):
         _initialize_actor_from_offline_bc(runner, agent_cfg.student_init_checkpoint)
+    if not agent_cfg.resume and agent_cfg.class_name == "OnPolicyRunner" and getattr(agent_cfg, "teacher_init_checkpoint", ""):
+        _initialize_actor_critic_from_teacher_checkpoint(runner, agent_cfg.teacher_init_checkpoint)
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)

@@ -6,12 +6,16 @@
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import TiledCameraCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
 
 from ..robots.fr3_ft_wc_cfg import FR3_FT_WC_CFG
 from .factory_tasks_cfg import FactoryTask, GearMesh, NutThread, PegInsert
+
+CAMERA_HEIGHT = 320
+CAMERA_WIDTH = 400
 
 OBS_DIM_CFG = {
     "fingertip_pos": 3,
@@ -55,7 +59,7 @@ class ObsRandCfg:
 class CtrlCfg:
     ema_factor = 0.2
 
-    pos_action_bounds = [0.05, 0.05, 0.05]
+    pos_action_bounds = [0.1, 0.1, 0.75] # boundaries for where the eef can operate in, if outside, control clip back to this bound
     rot_action_bounds = [1.0, 1.0, 1.0]
 
     pos_action_threshold = [0.02, 0.02, 0.02]
@@ -95,6 +99,14 @@ class ActionSlowdownCurriculumCfg:
 
 
 @configclass
+class ActorTargetPerturbCurriculumCfg:
+    enabled: bool = False
+    start_xy_noise_m: float = 0.0
+    end_xy_noise_m: float = 0.0
+    total_steps: int = 0
+
+
+@configclass
 class FactoryEnvCfg(DirectRLEnvCfg):
     decimation = 8
     action_space = 6
@@ -121,7 +133,9 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     task: FactoryTask = FactoryTask()
     obs_rand: ObsRandCfg = ObsRandCfg()
     ctrl: CtrlCfg = CtrlCfg()
+    pre_action_wait_seconds: float = 0.0
     action_slowdown_curriculum: ActionSlowdownCurriculumCfg = ActionSlowdownCurriculumCfg()
+    actor_target_perturb_curriculum: ActorTargetPerturbCurriculumCfg = ActorTargetPerturbCurriculumCfg()
 
     episode_length_s = 10.0  # Probably need to override.
     sim: SimulationCfg = SimulationCfg(
@@ -149,6 +163,8 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=128, env_spacing=2.0, clone_in_fabric=True)
 
     robot: ArticulationCfg = FR3_FT_WC_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    wrist_camera: TiledCameraCfg | None = None
+    side_view_camera: TiledCameraCfg | None = None
 
 
 @configclass
@@ -174,6 +190,37 @@ class FactoryTaskGearMeshSlowCfg(FactoryEnvCfg):
         enabled=True, start_scale=1.0, end_scale=0.4, total_steps=0
     )
     episode_length_s = 20.0
+
+
+@configclass
+class FactoryTaskGearMeshActorNoisyCfg(FactoryEnvCfg):
+    task_name = "gear_mesh"
+    task = GearMesh()
+    actor_target_perturb_curriculum: ActorTargetPerturbCurriculumCfg = ActorTargetPerturbCurriculumCfg(
+        enabled=True, start_xy_noise_m=0.0, end_xy_noise_m=0.01, total_steps=0
+    )
+    episode_length_s = 20.0
+
+
+@configclass
+class FactoryTaskGearMeshActorNoisyCameraCfg(FactoryTaskGearMeshActorNoisyCfg):
+    wrist_camera: TiledCameraCfg = TiledCameraCfg(
+        prim_path="/World/envs/env_.*/Robot/fr3/fr3_link8/camera_mount_for_franka_hand/ZED_X/base_link/ZED_X/CameraLeft",
+        update_period=0.0,
+        height=CAMERA_HEIGHT,
+        width=CAMERA_WIDTH,
+        data_types=["rgb"],
+        spawn=None,
+    )
+
+    side_view_camera: TiledCameraCfg = TiledCameraCfg(
+        prim_path="/World/envs/env_.*/Robot/fr3/side_view_camera",
+        update_period=0.0,
+        height=CAMERA_HEIGHT,
+        width=CAMERA_WIDTH,
+        data_types=["rgb"],
+        spawn=None,
+    )
 
 
 @configclass

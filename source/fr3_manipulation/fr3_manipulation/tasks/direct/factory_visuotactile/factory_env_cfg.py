@@ -14,12 +14,13 @@ from isaaclab.utils import configclass
 from ..robots.fr3_ft_wc_cfg import FR3_FT_WC_CFG
 from .factory_tasks_cfg import FactoryTask, GearMesh, NutThread, PegInsert
 
-CAMERA_HEIGHT = 180
-CAMERA_WIDTH = 320
+CAMERA_HEIGHT = 320
+CAMERA_WIDTH = 400
 IMAGE_EMBED_DIM = 256
 PROPRIO_DIM = 16  # joint_pos(7) + gripper_pos(1) + prev_action(8)
 PREV_ACTION_DIM = 8
 STUDENT_OBS_DIM = IMAGE_EMBED_DIM + PROPRIO_DIM
+PRIVILEGED_ACTOR_OBS_DIM = 51
 
 STATE_DIM_CFG = {
     "fingertip_pos": 3,
@@ -51,7 +52,7 @@ class ObsRandCfg:
 class CtrlCfg:
     ema_factor = 0.2
 
-    pos_action_bounds = [0.05, 0.05, 0.05]
+    pos_action_bounds = [0.1, 0.1, 0.75]
     rot_action_bounds = [1.0, 1.0, 1.0]
 
     pos_action_threshold = [0.02, 0.02, 0.02]
@@ -66,6 +67,14 @@ class CtrlCfg:
     default_dof_pos_tensor = [-1.3003, -0.4015, 1.1791, -2.1493, 0.4001, 1.9425, 0.4754]
     kp_null = 10.0
     kd_null = 6.3246
+
+
+@configclass
+class ActorTargetPerturbCurriculumCfg:
+    enabled: bool = False
+    start_xy_noise_m: float = 0.0
+    end_xy_noise_m: float = 0.0
+    total_steps: int = 0
 
 
 @configclass
@@ -96,6 +105,7 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     obs_rand: ObsRandCfg = ObsRandCfg()
     ctrl: CtrlCfg = CtrlCfg()
     offline_bc_checkpoint: str = ""
+    actor_target_perturb_curriculum: ActorTargetPerturbCurriculumCfg = ActorTargetPerturbCurriculumCfg()
 
     episode_length_s = 10.0  # Probably need to override.
     sim: SimulationCfg = SimulationCfg(
@@ -133,6 +143,15 @@ class FactoryEnvCfg(DirectRLEnvCfg):
         spawn=None,
     )
 
+    side_view_camera: TiledCameraCfg = TiledCameraCfg(
+        prim_path="/World/envs/env_.*/Robot/fr3/side_view_camera",
+        update_period=0.0,
+        height=CAMERA_HEIGHT,
+        width=CAMERA_WIDTH,
+        data_types=["rgb"],
+        spawn=None,
+    )
+
 
 @configclass
 class FactoryTaskPegInsertCfg(FactoryEnvCfg):
@@ -145,6 +164,17 @@ class FactoryTaskPegInsertCfg(FactoryEnvCfg):
 class FactoryTaskGearMeshCfg(FactoryEnvCfg):
     task_name = "gear_mesh"
     task = GearMesh()
+    episode_length_s = 20.0
+
+
+@configclass
+class FactoryTaskGearMeshActorNoisyCfg(FactoryEnvCfg):
+    observation_space = PRIVILEGED_ACTOR_OBS_DIM
+    task_name = "gear_mesh"
+    task = GearMesh()
+    actor_target_perturb_curriculum: ActorTargetPerturbCurriculumCfg = ActorTargetPerturbCurriculumCfg(
+        enabled=True, start_xy_noise_m=0.0, end_xy_noise_m=0.01, total_steps=0
+    )
     episode_length_s = 20.0
 
 

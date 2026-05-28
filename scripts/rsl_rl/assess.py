@@ -8,6 +8,7 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import importlib
 import sys
 
 from isaaclab.app import AppLauncher
@@ -29,6 +30,12 @@ parser.add_argument(
     type=int,
     default=1,
     help="Number of task episode-length loops to run before stopping. Use a value <= 0 to run until closed.",
+)
+parser.add_argument(
+    "--episode_length_s",
+    type=float,
+    default=None,
+    help="Override task episode length in seconds for assessment.",
 )
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
@@ -66,6 +73,12 @@ parser.add_argument(
     help="Disable fixed-asset Z-position randomization while keeping XY position randomization unchanged.",
 )
 parser.add_argument(
+    "--fixed_held_asset_height",
+    action="store_true",
+    default=False,
+    help="Disable held-asset Z-position randomization while keeping XY held-asset randomization unchanged.",
+)
+parser.add_argument(
     "--privileged_actor",
     action="store_true",
     default=False,
@@ -81,6 +94,12 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument(
+    "--action_scale",
+    type=float,
+    default=1.0,
+    help="Multiply policy actions by this factor before stepping the env. Values < 1 slow the policy down.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -127,6 +146,10 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import fr3_manipulation.tasks  # noqa: F401
+
+
+ACTOR_XY_EVAL_NOISE_M = 0.005
+ACTOR_XY_EVAL_NOISE_STD_M = ACTOR_XY_EVAL_NOISE_M / 3.0
 
 
 def _set_default_factory_video_view(env_cfg, task_name: str | None):
@@ -176,6 +199,61 @@ def _apply_factory_init_overrides(env_cfg):
         task_cfg.fixed_asset_init_pos_noise = pos_noise
         print("[INFO] Fixed asset height enabled: zeroed fixed-asset Z-position randomization noise.")
 
+    if args_cli.fixed_held_asset_height and hasattr(task_cfg, "held_asset_pos_noise"):
+        pos_noise = list(task_cfg.held_asset_pos_noise)
+        if len(pos_noise) < 3:
+            raise ValueError("task.held_asset_pos_noise must have at least 3 elements [x, y, z].")
+        pos_noise[2] = 0.0
+        task_cfg.held_asset_pos_noise = pos_noise
+        print("[INFO] Fixed held-asset height enabled: zeroed held-asset Z-position randomization noise.")
+
+
+def _override_actor_target_xy_noise_for_eval(env_cfg):
+    """Use fixed actor-side XY target noise for student-style evaluation/logging."""
+    curriculum_cfg = getattr(env_cfg, "actor_target_perturb_curriculum", None)
+    if curriculum_cfg is None or args_cli.privileged_actor:
+        return
+    curriculum_cfg.enabled = True
+    curriculum_cfg.start_xy_noise_m = ACTOR_XY_EVAL_NOISE_M
+    curriculum_cfg.end_xy_noise_m = ACTOR_XY_EVAL_NOISE_M
+    curriculum_cfg.total_steps = 1
+    print("[INFO] Actor target XY noise override enabled: clipped Gaussian reset noise in x,y within +/- 5.0 mm.")
+
+
+def _install_gaussian_actor_xy_noise(base_env):
+    """Replace uniform actor XY reset noise with clipped Gaussian noise for evaluation."""
+    if args_cli.privileged_actor or not hasattr(base_env, "_pre_physics_step"):
+        return
+    if not hasattr(base_env, "actor_held_xy_offset") or not hasattr(base_env, "cfg"):
+        return
+
+    original_pre_physics_step = base_env._pre_physics_step
+
+    def _pre_physics_step_gaussian_actor_noise(action):
+        env_ids = base_env.reset_buf.nonzero(as_tuple=False).squeeze(-1)
+        original_pre_physics_step(action)
+        if len(env_ids) == 0:
+            return
+        curriculum_cfg = getattr(base_env.cfg, "actor_target_perturb_curriculum", None)
+        if curriculum_cfg is None or not curriculum_cfg.enabled or base_env.current_actor_xy_noise <= 0.0:
+            return
+        xy_noise = torch.randn((len(env_ids), 2), device=base_env.device) * ACTOR_XY_EVAL_NOISE_STD_M
+        xy_noise = torch.clamp(xy_noise, -ACTOR_XY_EVAL_NOISE_M, ACTOR_XY_EVAL_NOISE_M)
+        base_env.actor_held_xy_offset[env_ids] = xy_noise
+        if hasattr(base_env, "last_actor_held_xy_offset"):
+            base_env.last_actor_held_xy_offset[env_ids] = xy_noise
+
+    base_env._pre_physics_step = _pre_physics_step_gaussian_actor_noise
+    print("[INFO] Actor target XY noise sampler override enabled: Gaussian with clipping at +/- 5.0 mm.")
+
+
+def _apply_episode_length_override(env_cfg):
+    """Override episode length for assessment when requested."""
+    if args_cli.episode_length_s is None:
+        return
+    env_cfg.episode_length_s = float(args_cli.episode_length_s)
+    print(f"[INFO] Episode length override set to {env_cfg.episode_length_s:.2f} s.")
+
 
 def _get_current_success_rate(env):
     """Compute the current Factory success rate from the raw environment state."""
@@ -208,6 +286,37 @@ def _print_env0_eef_euler(env, label: str):
     )
 
 
+def _print_env0_target_pos(env, label: str):
+    """Print env_0 target info and actor-side sampled target noise when available."""
+    if not hasattr(env, "fixed_pos_obs_frame"):
+        return
+    exact_target = env.fixed_pos_obs_frame[0].detach().cpu().numpy()
+    if hasattr(env, "actor_held_xy_offset") and not args_cli.privileged_actor:
+        actor_xy_noise = (
+            env.last_actor_held_xy_offset[0].detach().cpu().numpy()
+            if hasattr(env, "last_actor_held_xy_offset")
+            else env.actor_held_xy_offset[0].detach().cpu().numpy()
+        )
+        actor_noise_level_mm = float(getattr(env, "current_actor_xy_noise", 0.0)) * 1000.0
+        print(
+            f"[INFO] {label} env0 target pos exact={np.array2string(exact_target, precision=6, separator=', ')} "
+            f"actor_xy_offset={np.array2string(actor_xy_noise, precision=6, separator=', ')} "
+            f"actor_xy_noise_level_mm=+/- {actor_noise_level_mm:.1f}"
+        )
+        return
+
+    noise = np.zeros_like(exact_target)
+    noisy_target = exact_target.copy()
+    if hasattr(env, "init_fixed_pos_obs_noise"):
+        noise = env.init_fixed_pos_obs_noise[0].detach().cpu().numpy()
+        noisy_target = noisy_target + noise
+    print(
+        f"[INFO] {label} env0 target pos exact={np.array2string(exact_target, precision=6, separator=', ')} "
+        f"noisy={np.array2string(noisy_target, precision=6, separator=', ')} "
+        f"noise={np.array2string(noise, precision=6, separator=', ')}"
+    )
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Assess with RSL-RL agent."""
@@ -222,6 +331,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.task.randomize_hand_init_tilt = True
         env_cfg.task.hand_init_tilt_noise_deg = args_cli.random_orn
     _apply_factory_init_overrides(env_cfg)
+    _override_actor_target_xy_noise_for_eval(env_cfg)
+    _apply_episode_length_override(env_cfg)
     if args_cli.privileged_actor:
         agent_cfg.obs_groups = {"policy": ["critic"], "critic": ["critic"]}
 
@@ -261,6 +372,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env = multi_agent_to_single_agent(env)
 
     base_env = env.unwrapped
+    _install_gaussian_actor_xy_noise(base_env)
+    if hasattr(base_env, "current_actor_xy_noise") and not args_cli.privileged_actor:
+        print(f"[INFO] Actor target XY noise level before sim start: +/- {float(base_env.current_actor_xy_noise) * 1000.0:.1f} mm.")
     max_assessment_steps = None
     if args_cli.num_loops > 0:
         steps_per_loop = max(base_env.max_episode_length - 1, 1)
@@ -314,7 +428,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # reset environment
     obs = env.get_observations()
+    if args_cli.action_scale <= 0.0:
+        raise ValueError("--action_scale must be > 0.")
     _print_env0_eef_euler(base_env, "Reset")
+    _print_env0_target_pos(base_env, "Reset")
     timestep = 0
     completed_loops = 0
     loop_success_rates = []
@@ -323,7 +440,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     while simulation_app.is_running():
         start_time = time.time()
         with torch.inference_mode():
-            actions = policy(obs)
+            actions = policy(obs) * args_cli.action_scale
             obs, _, dones, extras = env.step(actions)
             if hasattr(policy_nn, "reset"):
                 policy_nn.reset(dones)
@@ -348,6 +465,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
                 print(f"[INFO] Loop {completed_loops}: {episode_text}, {final_text}")
                 _print_env0_eef_euler(base_env, f"Loop {completed_loops} end")
+                _print_env0_target_pos(base_env, f"Loop {completed_loops} end")
 
                 if args_cli.num_loops > 0 and completed_loops >= args_cli.num_loops:
                     break
