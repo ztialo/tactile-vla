@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import dill
+import h5py
 import hydra
 import math
 import os
@@ -300,6 +301,21 @@ def _center_crop_torch(images: torch.Tensor, crop_size: int | None) -> torch.Ten
     return images[:, top : top + crop_size, left : left + crop_size, :]
 
 
+def _artifact_trimmed_center_crop_torch(images: torch.Tensor, target_h: int, target_w: int) -> torch.Tensor:
+    """Match the logger crop that trims the bottom artifact row before center-cropping."""
+    height, width = images.shape[1:3]
+    if target_h > height or target_w > width:
+        raise ValueError(f"Requested crop {(target_h, target_w)} exceeds image size {(height, width)}.")
+    effective_height = height - 1
+    if target_h > effective_height:
+        raise ValueError(
+            f"Requested crop height {target_h} exceeds artifact-trimmed image height {effective_height}."
+        )
+    top = (effective_height - target_h) // 2
+    left = (width - target_w) // 2
+    return images[:, top : top + target_h, left : left + target_w, :]
+
+
 def _causal_moving_average_torch(values: torch.Tensor, window: int) -> torch.Tensor:
     """Apply a causal moving average over the time axis without future leakage."""
     if window < 1:
@@ -368,6 +384,7 @@ class OfflineDiffusionInferencePolicy:
             self.model.num_inference_steps = int(args_cli.num_inference_steps)
             print(f"[INFO] Overriding diffusion num_inference_steps to {self.model.num_inference_steps}.")
         self.image_crop_size = cfg.task.dataset.get("image_crop_size")
+        self.dataset_path = cfg.task.dataset.get("dataset_path")
         self.sample_obs_cfg = cfg.shape_meta.get("sample", {}).get("obs", {}).get("sparse", {})
         self.n_obs_steps = int(cfg.get("n_obs_steps", cfg.task.dataset.n_obs_steps))
         self.ft_ma_window = int(cfg.task.dataset.get("ft_ma_window", cfg.task.get("ft_ma_window", 1)))
@@ -415,13 +432,37 @@ class OfflineDiffusionInferencePolicy:
         self._robot = None
         self._left_ft_body_idx = None
         self._right_ft_body_idx = None
+        self._logged_rgb_resolution = self._load_logged_rgb_resolution()
 
     def reset(self):
         self._obs_histories = None
         self._action_plan = None
         self._action_step = 0
 
+    def _load_logged_rgb_resolution(self) -> tuple[int, int] | None:
+        dataset_path = self.dataset_path
+        if not dataset_path:
+            return None
+        dataset_path = os.path.abspath(os.path.expanduser(dataset_path))
+        if not os.path.exists(dataset_path):
+            print(f"[WARN] Training dataset not found while loading image preprocessing hints: {dataset_path}")
+            return None
+        try:
+            with h5py.File(dataset_path, "r") as h5_file:
+                resolution = h5_file.attrs.get("wrist_rgb_resolution", None)
+                if resolution is None:
+                    return None
+                width, height = [int(v) for v in np.asarray(resolution).tolist()]
+                return height, width
+        except Exception as exc:
+            print(f"[WARN] Failed to load training image preprocessing hints from {dataset_path}: {exc}")
+            return None
+
     def _normalize_images(self, rgb: torch.Tensor) -> torch.Tensor:
+        if self._logged_rgb_resolution is not None:
+            target_h, target_w = self._logged_rgb_resolution
+            if rgb.shape[1] != target_h or rgb.shape[2] != target_w:
+                rgb = _artifact_trimmed_center_crop_torch(rgb, target_h, target_w)
         rgb = _center_crop_torch(rgb, self.image_crop_size)
         rgb = rgb.permute(0, 3, 1, 2).contiguous()
         return rgb.float() / 255.0
