@@ -545,6 +545,9 @@ def main():
         episode_boundaries = np.cumsum([row_array.shape[0] for row_array in row_arrays[:-1]]).astype(np.int64).tolist()
         start = int(selected_bounds[0][0])
         end = int(selected_bounds[-1][1])
+        local_step_start = 0
+        local_step_end = int(rows.shape[0] - 1)
+        demo_step_text = f"policy steps {local_step_start}-{local_step_end}"
 
         wrist_rgb_raw = np.asarray(h5_file["wrist_rgb"][rows], dtype=np.uint8)
         side_view_rgb_raw = None
@@ -679,7 +682,7 @@ def main():
         axes[2, 1].set_xlabel("step")
         handles, labels = axes[0, 0].get_legend_handles_labels()
         fig.legend(handles, labels, loc="upper right")
-        fig.suptitle(f"{h5_path.name} | demo {demo_label} | rows {start}-{end}", fontsize=12)
+        fig.suptitle(f"{h5_path.name} | demo {demo_label} | {demo_step_text}", fontsize=12)
         fig.tight_layout()
         fig.savefig(plot_path, dpi=180)
         plt.close(fig)
@@ -690,7 +693,7 @@ def main():
             left_ft_filtered,
             right_ft_filtered,
             axis_names,
-            f"{h5_path.name} | demo {demo_label} | rows {start}-{end}",
+            f"{h5_path.name} | demo {demo_label} | {demo_step_text}",
             episode_boundaries=ft_episode_boundaries,
         )
         resized_for_sync = False
@@ -711,7 +714,7 @@ def main():
         plt.close(ft_fig)
         if args.plot is not None:
             plot_sides = ("left", "right") if args.plot == "both" else (args.plot,)
-            title_prefix = f"{h5_path.name} | demo {demo_label} | rows {start}-{end}"
+            title_prefix = f"{h5_path.name} | demo {demo_label} | {demo_step_text}"
             for side in plot_sides:
                 side_ft = left_ft if side == "left" else right_ft
                 side_ft_filtered = left_ft_filtered if side == "left" else right_ft_filtered
@@ -756,7 +759,11 @@ def main():
             print("[INFO] Sync video note: no resize needed (matched panel heights).")
     if args.no_video:
         print("[INFO] Video generation disabled by --no_video.")
-    print(f"[INFO] Demo rows:  {start}..{end} ({rows.shape[0]} concatenated steps)")
+    print(
+        f"[INFO] Demo policy steps: {local_step_start}..{local_step_end} "
+        f"({rows.shape[0]} concatenated steps)"
+    )
+    print(f"[INFO] Source rows:       {start}..{end}")
     print(f"[INFO] Replay FPS:  {fps}")
 
 

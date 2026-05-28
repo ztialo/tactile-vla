@@ -6,7 +6,7 @@ sparse_obs_rgb_horizon: 2
 sparse_obs_rgb_down_sample_steps: 1
 sparse_obs_state_horizon: 2
 sparse_obs_state_down_sample_steps: 1
-sparse_obs_wrench_horizon: 10
+sparse_obs_wrench_horizon: 2
 sparse_obs_wrench_down_sample_steps: 1
 ft_ma_window: 10
 sparse_action_horizon: 16
@@ -71,4 +71,6 @@ dataset:
   max_val_episodes: null
   image_crop_size: 224
   use_ft: true
+  ft_ma_window: ${task.ft_ma_window}
+  negate_ft: true
   rotation_rep: raw

@@ -358,6 +358,7 @@ class OfflineDiffusionInferencePolicy:
         self.sample_obs_cfg = cfg.shape_meta.get("sample", {}).get("obs", {}).get("sparse", {})
         self.n_obs_steps = int(cfg.get("n_obs_steps", cfg.task.dataset.n_obs_steps))
         self.ft_ma_window = int(cfg.task.dataset.get("ft_ma_window", cfg.task.get("ft_ma_window", 1)))
+        self.negate_ft = bool(cfg.task.dataset.get("negate_ft", cfg.task.get("negate_ft", False)))
         self.rgb_keys = [
             key for key, attr in cfg.shape_meta.obs.items() if attr.get("type", "low_dim") == "rgb"
         ]
@@ -390,7 +391,8 @@ class OfflineDiffusionInferencePolicy:
         print(
             "[INFO] Diffusion checkpoint FT config: "
             f"wrench_horizon={self.key_horizons.get('left_ft_wrench', 'n/a')}, "
-            f"ft_ma_window={self.ft_ma_window}."
+            f"ft_ma_window={self.ft_ma_window}, "
+            f"negate_ft={self.negate_ft}."
         )
         self._obs_histories = None
         self._action_plan = None
@@ -514,6 +516,8 @@ class OfflineDiffusionInferencePolicy:
         for key in [*self.rgb_keys, *self.low_dim_keys]:
             history = self._obs_histories[key]
             if key in self.wrench_keys:
+                if self.negate_ft:
+                    history = -history
                 history = _causal_moving_average_torch(history, self.ft_ma_window)
             obs_dict[key] = history[:, -self.key_horizons[key] :]
         return obs_dict
