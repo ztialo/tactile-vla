@@ -79,6 +79,30 @@ parser.add_argument(
     help="Disable held-asset Z-position randomization while keeping XY held-asset randomization unchanged.",
 )
 parser.add_argument(
+    "--disable_action_shaping",
+    action="store_true",
+    default=False,
+    help="Disable task-space workspace clipping and upright overwrite in _apply_action().",
+)
+parser.add_argument(
+    "--upright_penalty_scale",
+    type=float,
+    default=None,
+    help="Penalty scale for roll/pitch deviation from the configured upright target.",
+)
+parser.add_argument(
+    "--upright_tilt_termination_deg",
+    type=float,
+    default=None,
+    help="Terminate episodes when roll or pitch error exceeds this many degrees. Use <= 0 to disable.",
+)
+parser.add_argument(
+    "--workspace_escape_bounds_scale",
+    type=float,
+    default=None,
+    help="Terminate episodes when the EEF exits the action workspace bounds scaled by this factor. Use <= 0 to disable.",
+)
+parser.add_argument(
     "--privileged_actor",
     action="store_true",
     default=False,
@@ -171,6 +195,30 @@ def _to_float(value):
     return float(value)
 
 
+def _apply_factory_action_interface_overrides(task_cfg):
+    if args_cli.disable_action_shaping:
+        task_cfg.disable_action_shaping = True
+        print("[INFO] Action shaping disabled: no workspace clipping or upright overwrite in _apply_action().")
+
+    if args_cli.upright_penalty_scale is not None:
+        task_cfg.upright_penalty_scale = float(args_cli.upright_penalty_scale)
+        print(f"[INFO] Upright penalty scale set to {task_cfg.upright_penalty_scale:.4f}.")
+
+    if args_cli.upright_tilt_termination_deg is not None:
+        task_cfg.upright_tilt_termination_deg = float(args_cli.upright_tilt_termination_deg)
+        print(
+            "[INFO] Upright tilt termination set to "
+            f"{task_cfg.upright_tilt_termination_deg:.2f} deg."
+        )
+
+    if args_cli.workspace_escape_bounds_scale is not None:
+        task_cfg.workspace_escape_bounds_scale = float(args_cli.workspace_escape_bounds_scale)
+        print(
+            "[INFO] Workspace escape bounds scale set to "
+            f"{task_cfg.workspace_escape_bounds_scale:.3f}x."
+        )
+
+
 def _apply_factory_init_overrides(env_cfg):
     task_cfg = getattr(env_cfg, "task", None)
     if task_cfg is None:
@@ -206,6 +254,8 @@ def _apply_factory_init_overrides(env_cfg):
         pos_noise[2] = 0.0
         task_cfg.held_asset_pos_noise = pos_noise
         print("[INFO] Fixed held-asset height enabled: zeroed held-asset Z-position randomization noise.")
+
+    _apply_factory_action_interface_overrides(task_cfg)
 
 
 def _override_actor_target_xy_noise_for_eval(env_cfg):

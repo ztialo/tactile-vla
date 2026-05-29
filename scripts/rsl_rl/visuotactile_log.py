@@ -876,6 +876,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         h5_file.attrs["ft_layout"] = "per_policy_step_substeps"
         h5_file.attrs["ft_prim_paths"] = np.asarray([LEFT_FT_PRIM_PATH, RIGHT_FT_PRIM_PATH], dtype="S")
         h5_file.attrs["episode_layout"] = "contiguous_per_env_episode"
+        h5_file.attrs["controller_target_pose_order"] = "target_pos_xyz,target_quat_wxyz,target_gripper_width"
+        h5_file.attrs["episode_setup_layout"] = "repeated_per_row_episode_start_snapshot"
         h5_file.attrs["wrist_rgb_resolution"] = np.asarray([rgb_crop_width, rgb_crop_height], dtype=np.int64)
         h5_file.attrs["side_view_rgb_resolution"] = np.asarray([rgb_crop_width, rgb_crop_height], dtype=np.int64)
         h5_file.attrs["replay_center_crop"] = "216x216"
@@ -1001,11 +1003,80 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         "controller_effective_action": _tensor_to_numpy(
                             base_env.controller_effective_action, log_env_ids, dtype=np.float32
                         ),
+                        "controller_target_pos": _tensor_to_numpy(
+                            base_env.ctrl_target_fingertip_midpoint_pos, log_env_ids, dtype=np.float32
+                        ),
+                        "controller_target_quat": _tensor_to_numpy(
+                            base_env.ctrl_target_fingertip_midpoint_quat, log_env_ids, dtype=np.float32
+                        ),
+                        "controller_target_gripper": _tensor_to_numpy(
+                            base_env.ctrl_target_gripper_dof_pos, log_env_ids, dtype=np.float32
+                        ),
                         "eef_pos": _tensor_to_numpy(base_env.fingertip_midpoint_pos, log_env_ids, dtype=np.float32),
                         "eef_quat": _tensor_to_numpy(base_env.fingertip_midpoint_quat, log_env_ids, dtype=np.float32),
                         "left_ft_wrench": _tensor_to_numpy(left_ft_wrench, log_env_ids, dtype=np.float32),
                         "right_ft_wrench": _tensor_to_numpy(right_ft_wrench, log_env_ids, dtype=np.float32),
+                        "setup_robot_joint_pos": _tensor_to_numpy(
+                            base_env.episode_init_robot_joint_pos, log_env_ids, dtype=np.float32
+                        ),
+                        "setup_robot_joint_vel": _tensor_to_numpy(
+                            base_env.episode_init_robot_joint_vel, log_env_ids, dtype=np.float32
+                        ),
+                        "setup_ctrl_target_joint_pos": _tensor_to_numpy(
+                            base_env.episode_init_ctrl_target_joint_pos, log_env_ids, dtype=np.float32
+                        ),
+                        "setup_fixed_root_state": _tensor_to_numpy(
+                            base_env.episode_init_fixed_root_state, log_env_ids, dtype=np.float32
+                        ),
+                        "setup_held_root_state": _tensor_to_numpy(
+                            base_env.episode_init_held_root_state, log_env_ids, dtype=np.float32
+                        ),
+                        "setup_fixed_pos_obs_frame": _tensor_to_numpy(
+                            base_env.episode_init_fixed_pos_obs_frame, log_env_ids, dtype=np.float32
+                        ),
+                        "setup_init_fixed_pos_obs_noise": _tensor_to_numpy(
+                            base_env.episode_init_fixed_pos_obs_noise, log_env_ids, dtype=np.float32
+                        ),
+                        "setup_actions": _tensor_to_numpy(base_env.episode_init_actions, log_env_ids, dtype=np.float32),
+                        "setup_prev_actions": _tensor_to_numpy(
+                            base_env.episode_init_prev_actions, log_env_ids, dtype=np.float32
+                        ),
+                        "setup_prev_action_obs": _tensor_to_numpy(
+                            base_env.episode_init_prev_action_obs, log_env_ids, dtype=np.float32
+                        ),
+                        "setup_controller_effective_action": _tensor_to_numpy(
+                            base_env.episode_init_controller_effective_action, log_env_ids, dtype=np.float32
+                        ),
+                        "setup_prev_joint_pos": _tensor_to_numpy(
+                            base_env.episode_init_prev_joint_pos, log_env_ids, dtype=np.float32
+                        ),
+                        "setup_prev_fingertip_pos": _tensor_to_numpy(
+                            base_env.episode_init_prev_fingertip_pos, log_env_ids, dtype=np.float32
+                        ),
+                        "setup_prev_fingertip_quat": _tensor_to_numpy(
+                            base_env.episode_init_prev_fingertip_quat, log_env_ids, dtype=np.float32
+                        ),
+                        "setup_task_prop_gains": _tensor_to_numpy(
+                            base_env.episode_init_task_prop_gains, log_env_ids, dtype=np.float32
+                        ),
+                        "setup_task_deriv_gains": _tensor_to_numpy(
+                            base_env.episode_init_task_deriv_gains, log_env_ids, dtype=np.float32
+                        ),
+                        "setup_actor_held_xy_offset": _tensor_to_numpy(
+                            base_env.episode_init_actor_held_xy_offset, log_env_ids, dtype=np.float32
+                        ),
+                        "setup_last_actor_held_xy_offset": _tensor_to_numpy(
+                            base_env.episode_init_last_actor_held_xy_offset, log_env_ids, dtype=np.float32
+                        ),
                     }
+                    if hasattr(base_env, "episode_init_small_gear_root_state"):
+                        batch["setup_small_gear_root_state"] = _tensor_to_numpy(
+                            base_env.episode_init_small_gear_root_state, log_env_ids, dtype=np.float32
+                        )
+                    if hasattr(base_env, "episode_init_large_gear_root_state"):
+                        batch["setup_large_gear_root_state"] = _tensor_to_numpy(
+                            base_env.episode_init_large_gear_root_state, log_env_ids, dtype=np.float32
+                        )
                     if pre_action_hold_mask is not None and torch.any(pre_action_hold_mask):
                         label_actions = actions.clone()
                         label_actions[pre_action_hold_mask] = base_env.controller_effective_action[pre_action_hold_mask]

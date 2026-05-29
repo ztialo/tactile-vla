@@ -53,6 +53,30 @@ parser.add_argument(
     help="Disable fixed-asset Z-position randomization while keeping XY position randomization unchanged.",
 )
 parser.add_argument(
+    "--disable_action_shaping",
+    action="store_true",
+    default=False,
+    help="Disable task-space workspace clipping and upright overwrite in _apply_action().",
+)
+parser.add_argument(
+    "--upright_penalty_scale",
+    type=float,
+    default=None,
+    help="Penalty scale for roll/pitch deviation from the configured upright target.",
+)
+parser.add_argument(
+    "--upright_tilt_termination_deg",
+    type=float,
+    default=None,
+    help="Terminate episodes when roll or pitch error exceeds this many degrees. Use <= 0 to disable.",
+)
+parser.add_argument(
+    "--workspace_escape_bounds_scale",
+    type=float,
+    default=None,
+    help="Terminate episodes when the EEF exits the action workspace bounds scaled by this factor. Use <= 0 to disable.",
+)
+parser.add_argument(
     "--pre_action_wait_seconds",
     type=float,
     default=0.0,
@@ -144,6 +168,30 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
+
+
+def _apply_factory_action_interface_overrides(task_cfg):
+    if args_cli.disable_action_shaping:
+        task_cfg.disable_action_shaping = True
+        print("[INFO] Action shaping disabled: no workspace clipping or upright overwrite in _apply_action().")
+
+    if args_cli.upright_penalty_scale is not None:
+        task_cfg.upright_penalty_scale = float(args_cli.upright_penalty_scale)
+        print(f"[INFO] Upright penalty scale set to {task_cfg.upright_penalty_scale:.4f}.")
+
+    if args_cli.upright_tilt_termination_deg is not None:
+        task_cfg.upright_tilt_termination_deg = float(args_cli.upright_tilt_termination_deg)
+        print(
+            "[INFO] Upright tilt termination set to "
+            f"{task_cfg.upright_tilt_termination_deg:.2f} deg."
+        )
+
+    if args_cli.workspace_escape_bounds_scale is not None:
+        task_cfg.workspace_escape_bounds_scale = float(args_cli.workspace_escape_bounds_scale)
+        print(
+            "[INFO] Workspace escape bounds scale set to "
+            f"{task_cfg.workspace_escape_bounds_scale:.3f}x."
+        )
 
 
 def _initialize_distillation_student_from_offline_bc(runner, checkpoint_path: str):
@@ -256,6 +304,8 @@ def _apply_factory_init_overrides(env_cfg):
         pos_noise[2] = 0.0
         task_cfg.fixed_asset_init_pos_noise = pos_noise
         print("[INFO] Fixed asset height enabled: zeroed fixed-asset Z-position randomization noise.")
+
+    _apply_factory_action_interface_overrides(task_cfg)
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
