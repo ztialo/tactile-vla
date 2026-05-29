@@ -149,6 +149,8 @@ KEYBOARD_GRIPPER_COARSE_STEP = 0.001
 KEYBOARD_GRIPPER_STEP = 0.0002
 LEFT_FT_JOINT_NAME_CANDIDATES = ("fr3_left_ft_pad",)
 RIGHT_FT_JOINT_NAME_CANDIDATES = ("fr3_right_ft_pad",)
+LEFT_FT_BASE_JOINT_NAME_CANDIDATES = ("fr3_left_ft_base",)
+RIGHT_FT_BASE_JOINT_NAME_CANDIDATES = ("fr3_right_ft_base",)
 LEFT_FT_JOINT_PRIM_PATH = "/Root/fr3_ft_wc/fr3/fr3_left_ft_pad"
 RIGHT_FT_JOINT_PRIM_PATH = "/Root/fr3_ft_wc/fr3/fr3_right_ft_pad"
 GRIPPER_CONTACT_FORCE_THRESHOLD = 2.0
@@ -682,8 +684,8 @@ class FrankaTeleopAttachRuntime:
         self._ft_log_file = None
         self._ft_log_writer = None
         self._ft_log_path: Optional[Path] = None
-        self._ft_link_ids: Optional[Tuple[int, int]] = None
-        self._ft_link_names: Optional[Tuple[str, str]] = None
+        self._ft_link_ids: Optional[dict[str, int]] = None
+        self._ft_link_names: Optional[dict[str, str]] = None
         self._warned_ft_joint_force_missing = False
         self._printed_ft_joint_resolution = False
         self._live_plot_enabled = False
@@ -692,12 +694,16 @@ class FrankaTeleopAttachRuntime:
         self._live_plot_start_s: Optional[float] = None
         self._live_plot_last_draw_s = 0.0
         self._live_plot_times: deque[float] = deque()
-        self._live_plot_left_values: dict[str, deque[float]] = {}
-        self._live_plot_right_values: dict[str, deque[float]] = {}
+        self._live_plot_left_pad_values: dict[str, deque[float]] = {}
+        self._live_plot_right_pad_values: dict[str, deque[float]] = {}
+        self._live_plot_left_base_values: dict[str, deque[float]] = {}
+        self._live_plot_right_base_values: dict[str, deque[float]] = {}
+        self._live_plot_left_net_force_values: deque[float] = deque()
+        self._live_plot_right_net_force_values: deque[float] = deque()
         self._live_plot_plt = None
         self._live_plot_fig = None
         self._live_plot_axes_by_name: dict[str, Any] = {}
-        self._live_plot_lines: dict[str, tuple[Any, Any]] = {}
+        self._live_plot_lines: dict[str, dict[str, Any]] = {}
         self._printed_physics_dt_info = False
 
     def _reset_cycle_state(self) -> None:
@@ -831,18 +837,32 @@ class FrankaTeleopAttachRuntime:
                 [
                     "timestamp_utc",
                     "timestamp_unix_s",
-                    "left_fx",
-                    "left_fy",
-                    "left_fz",
-                    "left_tx",
-                    "left_ty",
-                    "left_tz",
-                    "right_fx",
-                    "right_fy",
-                    "right_fz",
-                    "right_tx",
-                    "right_ty",
-                    "right_tz",
+                    "left_pad_fx",
+                    "left_pad_fy",
+                    "left_pad_fz",
+                    "left_pad_tx",
+                    "left_pad_ty",
+                    "left_pad_tz",
+                    "right_pad_fx",
+                    "right_pad_fy",
+                    "right_pad_fz",
+                    "right_pad_tx",
+                    "right_pad_ty",
+                    "right_pad_tz",
+                    "left_base_fx",
+                    "left_base_fy",
+                    "left_base_fz",
+                    "left_base_tx",
+                    "left_base_ty",
+                    "left_base_tz",
+                    "right_base_fx",
+                    "right_base_fy",
+                    "right_base_fz",
+                    "right_base_tx",
+                    "right_base_ty",
+                    "right_base_tz",
+                    "left_net_force",
+                    "right_net_force",
                     "max_ft_force",
                 ]
             )
@@ -918,14 +938,32 @@ class FrankaTeleopAttachRuntime:
 
         try:
             plt.ion()
-            fig, axs = plt.subplots(len(axes), 1, num="Live FT", sharex=True)
+            fig, axs = plt.subplots(len(axes) + 1, 1, num="Live FT", sharex=True)
             ax_list = list(np.atleast_1d(axs).reshape(-1))
             axis_to_ax: dict[str, Any] = {}
-            axis_to_lines: dict[str, tuple[Any, Any]] = {}
-            for axis, ax in zip(axes, ax_list):
+            axis_to_lines: dict[str, dict[str, Any]] = {}
+
+            net_ax = ax_list[0]
+            (left_net_line,) = net_ax.plot([], [], label="left_net_force", linewidth=1.4)
+            (right_net_line,) = net_ax.plot([], [], label="right_net_force", linewidth=1.4)
+            net_ax.set_ylabel("net [N]")
+            net_ax.set_ylim(0.0, float(LIVE_FT_FORCE_Y_LIMIT))
+            net_ax.grid(True, alpha=0.3)
+            net_ax.legend(loc="best")
+            axis_to_ax["net_force"] = net_ax
+            axis_to_lines["net_force"] = {"left_net": left_net_line, "right_net": right_net_line}
+
+            for axis, ax in zip(axes, ax_list[1:]):
                 unit = "N" if axis.startswith("f") else "N*m"
-                (left_line,) = ax.plot([], [], label=f"left_{axis}", linewidth=1.2)
-                (right_line,) = ax.plot([], [], label=f"right_{axis}", linewidth=1.2)
+                (left_pad_line,) = ax.plot([], [], label=f"left_pad_{axis}", linewidth=1.2)
+                (right_pad_line,) = ax.plot([], [], label=f"right_pad_{axis}", linewidth=1.2)
+                (left_base_line,) = ax.plot([], [], label=f"left_base_{axis}", linewidth=1.0, linestyle="--")
+                (right_base_line,) = ax.plot([], [], label=f"right_base_{axis}", linewidth=1.0, linestyle="--")
+                left_net_line = None
+                right_net_line = None
+                if axis.startswith("f"):
+                    (left_net_line,) = ax.plot([], [], label=f"left_net_{axis}", linewidth=1.0, linestyle=":")
+                    (right_net_line,) = ax.plot([], [], label=f"right_net_{axis}", linewidth=1.0, linestyle=":")
                 ax.set_ylabel(f"{axis} [{unit}]")
                 if axis.startswith("f"):
                     ax.set_ylim(-float(LIVE_FT_FORCE_Y_LIMIT), float(LIVE_FT_FORCE_Y_LIMIT))
@@ -934,7 +972,14 @@ class FrankaTeleopAttachRuntime:
                 ax.grid(True, alpha=0.3)
                 ax.legend(loc="best")
                 axis_to_ax[axis] = ax
-                axis_to_lines[axis] = (left_line, right_line)
+                axis_to_lines[axis] = {
+                    "left_pad": left_pad_line,
+                    "right_pad": right_pad_line,
+                    "left_base": left_base_line,
+                    "right_base": right_base_line,
+                    "left_net": left_net_line,
+                    "right_net": right_net_line,
+                }
             if ax_list:
                 ax_list[-1].set_xlabel("time [s] from plot start")
             fig.tight_layout()
@@ -948,8 +993,12 @@ class FrankaTeleopAttachRuntime:
         self._live_plot_start_s = None
         self._live_plot_last_draw_s = 0.0
         self._live_plot_times.clear()
-        self._live_plot_left_values = {axis: deque() for axis in self._live_plot_axes}
-        self._live_plot_right_values = {axis: deque() for axis in self._live_plot_axes}
+        self._live_plot_left_pad_values = {axis: deque() for axis in self._live_plot_axes}
+        self._live_plot_right_pad_values = {axis: deque() for axis in self._live_plot_axes}
+        self._live_plot_left_base_values = {axis: deque() for axis in self._live_plot_axes}
+        self._live_plot_right_base_values = {axis: deque() for axis in self._live_plot_axes}
+        self._live_plot_left_net_force_values = deque()
+        self._live_plot_right_net_force_values = deque()
         self._live_plot_plt = plt
         self._live_plot_fig = fig
         self._live_plot_axes_by_name = axis_to_ax
@@ -968,8 +1017,12 @@ class FrankaTeleopAttachRuntime:
         self._live_plot_start_s = None
         self._live_plot_last_draw_s = 0.0
         self._live_plot_times.clear()
-        self._live_plot_left_values = {}
-        self._live_plot_right_values = {}
+        self._live_plot_left_pad_values = {}
+        self._live_plot_right_pad_values = {}
+        self._live_plot_left_base_values = {}
+        self._live_plot_right_base_values = {}
+        self._live_plot_left_net_force_values = deque()
+        self._live_plot_right_net_force_values = deque()
         self._live_plot_plt = None
         self._live_plot_fig = None
         self._live_plot_axes_by_name = {}
@@ -977,8 +1030,10 @@ class FrankaTeleopAttachRuntime:
 
     def _update_live_ft_plot(
         self,
-        left_wrench: Optional[np.ndarray],
-        right_wrench: Optional[np.ndarray],
+        left_pad_wrench: Optional[np.ndarray],
+        right_pad_wrench: Optional[np.ndarray],
+        left_base_wrench: Optional[np.ndarray],
+        right_base_wrench: Optional[np.ndarray],
     ) -> None:
         if not self._live_plot_enabled:
             return
@@ -1008,18 +1063,41 @@ class FrankaTeleopAttachRuntime:
             axis_index = self._live_plot_axis_indices.get(axis)
             if axis_index is None:
                 continue
-            self._live_plot_left_values[axis].append(_extract_axis_value(left_wrench, axis_index))
-            self._live_plot_right_values[axis].append(_extract_axis_value(right_wrench, axis_index))
+            self._live_plot_left_pad_values[axis].append(_extract_axis_value(left_pad_wrench, axis_index))
+            self._live_plot_right_pad_values[axis].append(_extract_axis_value(right_pad_wrench, axis_index))
+            self._live_plot_left_base_values[axis].append(_extract_axis_value(left_base_wrench, axis_index))
+            self._live_plot_right_base_values[axis].append(_extract_axis_value(right_base_wrench, axis_index))
+
+        def _net_force_value(pad_wrench: Optional[np.ndarray], base_wrench: Optional[np.ndarray]) -> float:
+            if pad_wrench is None or base_wrench is None:
+                return float("nan")
+            pad_arr = np.asarray(pad_wrench, dtype=np.float64).reshape(-1)
+            base_arr = np.asarray(base_wrench, dtype=np.float64).reshape(-1)
+            if pad_arr.size < 3 or base_arr.size < 3:
+                return float("nan")
+            value = float(np.linalg.norm(pad_arr[:3] - base_arr[:3]))
+            return value if math.isfinite(value) else float("nan")
+
+        self._live_plot_left_net_force_values.append(_net_force_value(left_pad_wrench, left_base_wrench))
+        self._live_plot_right_net_force_values.append(_net_force_value(right_pad_wrench, right_base_wrench))
 
         window_s = float(LIVE_FT_PLOT_WINDOW_SECONDS)
         if window_s > 0.0:
             while self._live_plot_times and (t_rel - self._live_plot_times[0]) > window_s:
                 self._live_plot_times.popleft()
+                if self._live_plot_left_net_force_values:
+                    self._live_plot_left_net_force_values.popleft()
+                if self._live_plot_right_net_force_values:
+                    self._live_plot_right_net_force_values.popleft()
                 for axis in self._live_plot_axes:
-                    if self._live_plot_left_values[axis]:
-                        self._live_plot_left_values[axis].popleft()
-                    if self._live_plot_right_values[axis]:
-                        self._live_plot_right_values[axis].popleft()
+                    if self._live_plot_left_pad_values[axis]:
+                        self._live_plot_left_pad_values[axis].popleft()
+                    if self._live_plot_right_pad_values[axis]:
+                        self._live_plot_right_pad_values[axis].popleft()
+                    if self._live_plot_left_base_values[axis]:
+                        self._live_plot_left_base_values[axis].popleft()
+                    if self._live_plot_right_base_values[axis]:
+                        self._live_plot_right_base_values[axis].popleft()
 
         update_hz = float(max(LIVE_FT_PLOT_UPDATE_HZ, 0.5))
         min_period = 1.0 / update_hz
@@ -1029,11 +1107,33 @@ class FrankaTeleopAttachRuntime:
 
         try:
             times = list(self._live_plot_times)
+            net_lines = self._live_plot_lines["net_force"]
+            net_ax = self._live_plot_axes_by_name["net_force"]
+            net_lines["left_net"].set_data(times, list(self._live_plot_left_net_force_values))
+            net_lines["right_net"].set_data(times, list(self._live_plot_right_net_force_values))
+            net_ax.relim()
+            net_ax.autoscale_view()
+            net_ax.set_ylim(0.0, float(LIVE_FT_FORCE_Y_LIMIT))
+            if window_s > 0.0:
+                xmin = max(0.0, t_rel - window_s)
+                xmax = max(t_rel, xmin + 1e-3)
+                net_ax.set_xlim(xmin, xmax)
             for axis in self._live_plot_axes:
-                left_line, right_line = self._live_plot_lines[axis]
+                axis_lines = self._live_plot_lines[axis]
                 ax_obj = self._live_plot_axes_by_name[axis]
-                left_line.set_data(times, list(self._live_plot_left_values[axis]))
-                right_line.set_data(times, list(self._live_plot_right_values[axis]))
+                axis_lines["left_pad"].set_data(times, list(self._live_plot_left_pad_values[axis]))
+                axis_lines["right_pad"].set_data(times, list(self._live_plot_right_pad_values[axis]))
+                axis_lines["left_base"].set_data(times, list(self._live_plot_left_base_values[axis]))
+                axis_lines["right_base"].set_data(times, list(self._live_plot_right_base_values[axis]))
+                if axis.startswith("f"):
+                    left_net_component = np.asarray(list(self._live_plot_left_pad_values[axis]), dtype=np.float64) - np.asarray(
+                        list(self._live_plot_left_base_values[axis]), dtype=np.float64
+                    )
+                    right_net_component = np.asarray(
+                        list(self._live_plot_right_pad_values[axis]), dtype=np.float64
+                    ) - np.asarray(list(self._live_plot_right_base_values[axis]), dtype=np.float64)
+                    axis_lines["left_net"].set_data(times, left_net_component.tolist())
+                    axis_lines["right_net"].set_data(times, right_net_component.tolist())
                 ax_obj.relim()
                 ax_obj.autoscale_view()
                 if axis.startswith("f"):
@@ -1052,32 +1152,56 @@ class FrankaTeleopAttachRuntime:
 
     def _log_ft_row(
         self,
-        left_wrench: Optional[np.ndarray],
-        right_wrench: Optional[np.ndarray],
+        left_pad_wrench: Optional[np.ndarray],
+        right_pad_wrench: Optional[np.ndarray],
+        left_base_wrench: Optional[np.ndarray],
+        right_base_wrench: Optional[np.ndarray],
         max_force: Optional[float],
     ) -> None:
         if self._ft_log_writer is None or self._ft_log_file is None:
             return
         now = datetime.now(timezone.utc)
-        left_w = None if left_wrench is None else np.asarray(left_wrench, dtype=np.float64).reshape(-1)
-        right_w = None if right_wrench is None else np.asarray(right_wrench, dtype=np.float64).reshape(-1)
+        left_pad_w = None if left_pad_wrench is None else np.asarray(left_pad_wrench, dtype=np.float64).reshape(-1)
+        right_pad_w = None if right_pad_wrench is None else np.asarray(right_pad_wrench, dtype=np.float64).reshape(-1)
+        left_base_w = None if left_base_wrench is None else np.asarray(left_base_wrench, dtype=np.float64).reshape(-1)
+        right_base_w = None if right_base_wrench is None else np.asarray(right_base_wrench, dtype=np.float64).reshape(-1)
+        left_net_force = None
+        right_net_force = None
+        if left_pad_w is not None and left_pad_w.size >= 3 and left_base_w is not None and left_base_w.size >= 3:
+            left_net_force = float(np.linalg.norm(left_pad_w[:3] - left_base_w[:3]))
+        if right_pad_w is not None and right_pad_w.size >= 3 and right_base_w is not None and right_base_w.size >= 3:
+            right_net_force = float(np.linalg.norm(right_pad_w[:3] - right_base_w[:3]))
         try:
             self._ft_log_writer.writerow(
                 [
                     now.isoformat(),
                     f"{now.timestamp():.6f}",
-                    _fmt_optional_scalar(None if left_w is None or left_w.size < 1 else left_w[0]),
-                    _fmt_optional_scalar(None if left_w is None or left_w.size < 2 else left_w[1]),
-                    _fmt_optional_scalar(None if left_w is None or left_w.size < 3 else left_w[2]),
-                    _fmt_optional_scalar(None if left_w is None or left_w.size < 4 else left_w[3]),
-                    _fmt_optional_scalar(None if left_w is None or left_w.size < 5 else left_w[4]),
-                    _fmt_optional_scalar(None if left_w is None or left_w.size < 6 else left_w[5]),
-                    _fmt_optional_scalar(None if right_w is None or right_w.size < 1 else right_w[0]),
-                    _fmt_optional_scalar(None if right_w is None or right_w.size < 2 else right_w[1]),
-                    _fmt_optional_scalar(None if right_w is None or right_w.size < 3 else right_w[2]),
-                    _fmt_optional_scalar(None if right_w is None or right_w.size < 4 else right_w[3]),
-                    _fmt_optional_scalar(None if right_w is None or right_w.size < 5 else right_w[4]),
-                    _fmt_optional_scalar(None if right_w is None or right_w.size < 6 else right_w[5]),
+                    _fmt_optional_scalar(None if left_pad_w is None or left_pad_w.size < 1 else left_pad_w[0]),
+                    _fmt_optional_scalar(None if left_pad_w is None or left_pad_w.size < 2 else left_pad_w[1]),
+                    _fmt_optional_scalar(None if left_pad_w is None or left_pad_w.size < 3 else left_pad_w[2]),
+                    _fmt_optional_scalar(None if left_pad_w is None or left_pad_w.size < 4 else left_pad_w[3]),
+                    _fmt_optional_scalar(None if left_pad_w is None or left_pad_w.size < 5 else left_pad_w[4]),
+                    _fmt_optional_scalar(None if left_pad_w is None or left_pad_w.size < 6 else left_pad_w[5]),
+                    _fmt_optional_scalar(None if right_pad_w is None or right_pad_w.size < 1 else right_pad_w[0]),
+                    _fmt_optional_scalar(None if right_pad_w is None or right_pad_w.size < 2 else right_pad_w[1]),
+                    _fmt_optional_scalar(None if right_pad_w is None or right_pad_w.size < 3 else right_pad_w[2]),
+                    _fmt_optional_scalar(None if right_pad_w is None or right_pad_w.size < 4 else right_pad_w[3]),
+                    _fmt_optional_scalar(None if right_pad_w is None or right_pad_w.size < 5 else right_pad_w[4]),
+                    _fmt_optional_scalar(None if right_pad_w is None or right_pad_w.size < 6 else right_pad_w[5]),
+                    _fmt_optional_scalar(None if left_base_w is None or left_base_w.size < 1 else left_base_w[0]),
+                    _fmt_optional_scalar(None if left_base_w is None or left_base_w.size < 2 else left_base_w[1]),
+                    _fmt_optional_scalar(None if left_base_w is None or left_base_w.size < 3 else left_base_w[2]),
+                    _fmt_optional_scalar(None if left_base_w is None or left_base_w.size < 4 else left_base_w[3]),
+                    _fmt_optional_scalar(None if left_base_w is None or left_base_w.size < 5 else left_base_w[4]),
+                    _fmt_optional_scalar(None if left_base_w is None or left_base_w.size < 6 else left_base_w[5]),
+                    _fmt_optional_scalar(None if right_base_w is None or right_base_w.size < 1 else right_base_w[0]),
+                    _fmt_optional_scalar(None if right_base_w is None or right_base_w.size < 2 else right_base_w[1]),
+                    _fmt_optional_scalar(None if right_base_w is None or right_base_w.size < 3 else right_base_w[2]),
+                    _fmt_optional_scalar(None if right_base_w is None or right_base_w.size < 4 else right_base_w[3]),
+                    _fmt_optional_scalar(None if right_base_w is None or right_base_w.size < 5 else right_base_w[4]),
+                    _fmt_optional_scalar(None if right_base_w is None or right_base_w.size < 6 else right_base_w[5]),
+                    _fmt_optional_scalar(left_net_force),
+                    _fmt_optional_scalar(right_net_force),
                     _fmt_optional_scalar(max_force),
                 ]
             )
@@ -1712,7 +1836,7 @@ class FrankaTeleopAttachRuntime:
             return force_val if math.isfinite(force_val) else None
         return None
 
-    def _resolve_ft_link_ids(self) -> Optional[Tuple[int, int]]:
+    def _resolve_ft_link_ids(self) -> Optional[dict[str, int]]:
         if self._ft_link_ids is not None:
             return self._ft_link_ids
         if self._fr3 is None:
@@ -1724,17 +1848,29 @@ class FrankaTeleopAttachRuntime:
             if isinstance(body_names, Sequence):
                 body_names = list(body_names)
                 try:
-                    left_name = next(name for name in LEFT_FT_JOINT_NAME_CANDIDATES if name in body_names)
-                    right_name = next(name for name in RIGHT_FT_JOINT_NAME_CANDIDATES if name in body_names)
-                    left_id = int(articulation_view.get_body_index(left_name))
-                    right_id = int(articulation_view.get_body_index(right_name))
-                    self._ft_link_ids = (left_id, right_id)
-                    self._ft_link_names = (str(left_name), str(right_name))
+                    left_pad_name = next(name for name in LEFT_FT_JOINT_NAME_CANDIDATES if name in body_names)
+                    right_pad_name = next(name for name in RIGHT_FT_JOINT_NAME_CANDIDATES if name in body_names)
+                    left_base_name = next(name for name in LEFT_FT_BASE_JOINT_NAME_CANDIDATES if name in body_names)
+                    right_base_name = next(name for name in RIGHT_FT_BASE_JOINT_NAME_CANDIDATES if name in body_names)
+                    self._ft_link_ids = {
+                        "left_pad": int(articulation_view.get_body_index(left_pad_name)),
+                        "right_pad": int(articulation_view.get_body_index(right_pad_name)),
+                        "left_base": int(articulation_view.get_body_index(left_base_name)),
+                        "right_base": int(articulation_view.get_body_index(right_base_name)),
+                    }
+                    self._ft_link_names = {
+                        "left_pad": str(left_pad_name),
+                        "right_pad": str(right_pad_name),
+                        "left_base": str(left_base_name),
+                        "right_base": str(right_base_name),
+                    }
                     if not self._printed_ft_joint_resolution:
                         print(
                             "[INFO] Resolved FT link ids for measured articulation forces: "
-                            f"left_joint_index={left_id} ({left_name}), "
-                            f"right_joint_index={right_id} ({right_name})",
+                            f"left_pad={self._ft_link_ids['left_pad']} ({left_pad_name}), "
+                            f"right_pad={self._ft_link_ids['right_pad']} ({right_pad_name}), "
+                            f"left_base={self._ft_link_ids['left_base']} ({left_base_name}), "
+                            f"right_base={self._ft_link_ids['right_base']} ({right_base_name})",
                             flush=True,
                         )
                         self._printed_ft_joint_resolution = True
@@ -1744,7 +1880,9 @@ class FrankaTeleopAttachRuntime:
                         print(
                             "[WARN] FT body-name resolution failed. "
                             f"Expected left in {LEFT_FT_JOINT_NAME_CANDIDATES}, "
-                            f"right in {RIGHT_FT_JOINT_NAME_CANDIDATES}. "
+                            f"right in {RIGHT_FT_JOINT_NAME_CANDIDATES}, "
+                            f"left base in {LEFT_FT_BASE_JOINT_NAME_CANDIDATES}, "
+                            f"right base in {RIGHT_FT_BASE_JOINT_NAME_CANDIDATES}. "
                             f"Available articulation body names: {body_names}",
                             flush=True,
                         )
@@ -1798,6 +1936,14 @@ class FrankaTeleopAttachRuntime:
         Optional[str],
         Optional[np.ndarray],
         Optional[np.ndarray],
+        str,
+        Optional[int],
+        Optional[str],
+        Optional[np.ndarray],
+        str,
+        Optional[int],
+        Optional[str],
+        Optional[np.ndarray],
         Optional[float],
     ]:
         left_source = "none"
@@ -1810,13 +1956,26 @@ class FrankaTeleopAttachRuntime:
         right_joint_name = None
         right_wrench = None
         right_xyz = None
+        left_base_source = "none"
+        left_base_joint_index = None
+        left_base_joint_name = None
+        left_base_wrench = None
+        right_base_source = "none"
+        right_base_joint_index = None
+        right_base_joint_name = None
+        right_base_wrench = None
 
         ft_link_ids = self._resolve_ft_link_ids()
         if ft_link_ids is not None:
-            left_joint_index = int(ft_link_ids[0])
-            right_joint_index = int(ft_link_ids[1])
+            left_joint_index = int(ft_link_ids["left_pad"])
+            right_joint_index = int(ft_link_ids["right_pad"])
+            left_base_joint_index = int(ft_link_ids["left_base"])
+            right_base_joint_index = int(ft_link_ids["right_base"])
             if self._ft_link_names is not None:
-                left_joint_name, right_joint_name = self._ft_link_names
+                left_joint_name = self._ft_link_names.get("left_pad")
+                right_joint_name = self._ft_link_names.get("right_pad")
+                left_base_joint_name = self._ft_link_names.get("left_base")
+                right_base_joint_name = self._ft_link_names.get("right_base")
 
             left_wrench = self._read_measured_link_wrench(left_joint_index)
             if left_wrench is not None:
@@ -1827,6 +1986,14 @@ class FrankaTeleopAttachRuntime:
             if right_wrench is not None:
                 right_xyz = np.asarray(right_wrench[:3], dtype=np.float64)
                 right_source = "measured_articulation"
+
+            left_base_wrench = self._read_measured_link_wrench(left_base_joint_index)
+            if left_base_wrench is not None:
+                left_base_source = "measured_articulation"
+
+            right_base_wrench = self._read_measured_link_wrench(right_base_joint_index)
+            if right_base_wrench is not None:
+                right_base_source = "measured_articulation"
 
         if left_xyz is None:
             left_xyz = self._read_ft_force_vector(LEFT_FT_JOINT_PRIM_PATH)
@@ -1859,6 +2026,14 @@ class FrankaTeleopAttachRuntime:
                 right_joint_name,
                 right_wrench,
                 right_xyz,
+                left_base_source,
+                left_base_joint_index,
+                left_base_joint_name,
+                left_base_wrench,
+                right_base_source,
+                right_base_joint_index,
+                right_base_joint_name,
+                right_base_wrench,
                 None,
             )
         self._warned_ft_unavailable = False
@@ -1873,6 +2048,14 @@ class FrankaTeleopAttachRuntime:
             right_joint_name,
             right_wrench,
             right_xyz,
+            left_base_source,
+            left_base_joint_index,
+            left_base_joint_name,
+            left_base_wrench,
+            right_base_source,
+            right_base_joint_index,
+            right_base_joint_name,
+            right_base_wrench,
             max(vals),
         )
 
@@ -1901,15 +2084,24 @@ class FrankaTeleopAttachRuntime:
             )
 
         ft_read = self._read_gripper_contact_forces()
-        left_wrench = ft_read[3]
-        right_wrench = ft_read[8]
-        max_force = ft_read[10]
+        left_pad_wrench = ft_read[3]
+        right_pad_wrench = ft_read[8]
+        left_base_wrench = ft_read[13]
+        right_base_wrench = ft_read[17]
+        max_force = ft_read[18]
         self._log_ft_row(
-            left_wrench,
-            right_wrench,
+            left_pad_wrench,
+            right_pad_wrench,
+            left_base_wrench,
+            right_base_wrench,
             max_force,
         )
-        self._update_live_ft_plot(left_wrench, right_wrench)
+        self._update_live_ft_plot(
+            left_pad_wrench,
+            right_pad_wrench,
+            left_base_wrench,
+            right_base_wrench,
+        )
 
         opening_requested = self._gripper_target_width > (self._gripper_applied_width + 1e-6)
 
