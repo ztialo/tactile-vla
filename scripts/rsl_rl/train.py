@@ -170,6 +170,42 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
 
+def _patch_runner_success_logging():
+    """Augment runner logging with iteration-wide final-step success rate."""
+    original_log = OnPolicyRunner.log
+
+    def _patched_log(self, locs: dict, width: int = 80, pad: int = 35):
+        original_log(self, locs, width=width, pad=pad)
+
+        if not locs.get("ep_infos"):
+            return
+
+        success_values = []
+        for ep_info in locs["ep_infos"]:
+            if "successes" not in ep_info:
+                continue
+            success_value = ep_info["successes"]
+            if not isinstance(success_value, torch.Tensor):
+                success_value = torch.tensor([success_value], device=self.device)
+            elif success_value.ndim == 0:
+                success_value = success_value.unsqueeze(0)
+            success_values.append(success_value.to(self.device).float())
+
+        if not success_values:
+            return
+
+        iteration_final_success_rate = torch.cat(success_values).mean()
+        self.writer.add_scalar("Train/iteration_final_step_success_rate", iteration_final_success_rate, locs["it"])
+        print(f"{'Iteration final-step success rate:':>{pad}} {iteration_final_success_rate:.4f}")
+
+    OnPolicyRunner.log = _patched_log
+    if hasattr(DistillationRunner, "log"):
+        DistillationRunner.log = _patched_log
+
+
+_patch_runner_success_logging()
+
+
 def _apply_factory_action_interface_overrides(task_cfg):
     if args_cli.disable_action_shaping:
         task_cfg.disable_action_shaping = True

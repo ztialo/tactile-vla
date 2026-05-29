@@ -22,6 +22,10 @@ from . import factory_control, factory_utils
 from .factory_env_cfg import OBS_DIM_CFG, STATE_DIM_CFG, FactoryEnvCfg
 
 
+def _wrap_angle(angle: torch.Tensor) -> torch.Tensor:
+    return torch.atan2(torch.sin(angle), torch.cos(angle))
+
+
 class FactoryEnv(DirectRLEnv):
     cfg: FactoryEnvCfg
 
@@ -127,6 +131,25 @@ class FactoryEnv(DirectRLEnv):
         if (not force) and abs(current_noise - self.current_actor_xy_noise) < 1.0e-8:
             return
         self.current_actor_xy_noise = current_noise
+
+    def _get_upright_errors(self):
+        """Return absolute roll/pitch errors from the configured upright target."""
+        current_euler_xyz = torch.stack(torch_utils.get_euler_xyz(self.fingertip_midpoint_quat), dim=1)
+        roll_error = torch.abs(_wrap_angle(current_euler_xyz[:, 0] - self.cfg_task.upright_roll_target_rad))
+        pitch_error = torch.abs(_wrap_angle(current_euler_xyz[:, 1] - self.cfg_task.upright_pitch_target_rad))
+        return roll_error, pitch_error
+
+    def _get_workspace_escape_mask(self):
+        """Return environments whose fingertip escaped the configured workspace bounds."""
+        if float(getattr(self.cfg_task, "workspace_escape_bounds_scale", 0.0)) <= 0.0:
+            return torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
+        fixed_pos_action_frame = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
+        delta_pos = self.fingertip_midpoint_pos - fixed_pos_action_frame
+        lower_bounds = -self._base_pos_action_bounds[0] * float(self.cfg_task.workspace_escape_bounds_scale)
+        upper_bounds = self._base_pos_action_bounds[1] * float(self.cfg_task.workspace_escape_bounds_scale)
+        below_lower = torch.any(delta_pos < lower_bounds, dim=1)
+        above_upper = torch.any(delta_pos > upper_bounds, dim=1)
+        return torch.logical_or(below_lower, above_upper)
 
     def _init_tensors(self):
         """Initialize tensors once."""
@@ -429,6 +452,7 @@ class FactoryEnv(DirectRLEnv):
         # Check if we need to re-compute velocities within the decimation loop.
         if self.last_update_timestamp < self._robot._data._sim_timestamp:
             self._compute_intermediate_values(dt=self.physics_dt)
+        disable_action_shaping = bool(getattr(self.cfg_task, "disable_action_shaping", False))
 
         # Interpret actions as target pos displacements and set pos target
         pos_actions = self.actions[:, 0:3] * self.pos_threshold
@@ -440,13 +464,14 @@ class FactoryEnv(DirectRLEnv):
         rot_actions = rot_actions * self.rot_threshold
 
         ctrl_target_fingertip_midpoint_pos = self.fingertip_midpoint_pos + pos_actions
-        # To speed up learning, never allow the policy to move more than 5cm away from the base.
-        fixed_pos_action_frame = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
-        delta_pos = ctrl_target_fingertip_midpoint_pos - fixed_pos_action_frame
-        pos_error_clipped = torch.clip(
-            delta_pos, -self.pos_action_bounds[0], self.pos_action_bounds[1]
-        )
-        ctrl_target_fingertip_midpoint_pos = fixed_pos_action_frame + pos_error_clipped
+        if not disable_action_shaping:
+            # To speed up learning, never allow the policy to move more than 5cm away from the base.
+            fixed_pos_action_frame = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
+            delta_pos = ctrl_target_fingertip_midpoint_pos - fixed_pos_action_frame
+            pos_error_clipped = torch.clip(
+                delta_pos, -self.pos_action_bounds[0], self.pos_action_bounds[1]
+            )
+            ctrl_target_fingertip_midpoint_pos = fixed_pos_action_frame + pos_error_clipped
 
         # Convert to quat and set rot target
         angle = torch.norm(rot_actions, p=2, dim=-1)
@@ -460,13 +485,14 @@ class FactoryEnv(DirectRLEnv):
         )
         ctrl_target_fingertip_midpoint_quat = torch_utils.quat_mul(rot_actions_quat, self.fingertip_midpoint_quat)
 
-        target_euler_xyz = torch.stack(torch_utils.get_euler_xyz(ctrl_target_fingertip_midpoint_quat), dim=1)
-        target_euler_xyz[:, 0] = 3.14159  # Restrict actions to be upright.
-        target_euler_xyz[:, 1] = 0.0
+        if not disable_action_shaping:
+            target_euler_xyz = torch.stack(torch_utils.get_euler_xyz(ctrl_target_fingertip_midpoint_quat), dim=1)
+            target_euler_xyz[:, 0] = self.cfg_task.upright_roll_target_rad
+            target_euler_xyz[:, 1] = self.cfg_task.upright_pitch_target_rad
 
-        ctrl_target_fingertip_midpoint_quat = torch_utils.quat_from_euler_xyz(
-            roll=target_euler_xyz[:, 0], pitch=target_euler_xyz[:, 1], yaw=target_euler_xyz[:, 2]
-        )
+            ctrl_target_fingertip_midpoint_quat = torch_utils.quat_from_euler_xyz(
+                roll=target_euler_xyz[:, 0], pitch=target_euler_xyz[:, 1], yaw=target_euler_xyz[:, 2]
+            )
 
         grasp_close_width = self.cfg_task.held_asset_cfg.diameter / 2.0 * 0.875
         self.generate_ctrl_signals(
@@ -512,6 +538,16 @@ class FactoryEnv(DirectRLEnv):
         """
         self._compute_intermediate_values(dt=self.physics_dt)
         time_out = self.episode_length_buf >= self.max_episode_length - 1
+        tilt_threshold_deg = float(getattr(self.cfg_task, "upright_tilt_termination_deg", 0.0))
+        if tilt_threshold_deg > 0.0:
+            roll_error, pitch_error = self._get_upright_errors()
+            tilt_threshold_rad = torch.deg2rad(torch.tensor(tilt_threshold_deg, device=self.device))
+            extreme_tilt = torch.logical_or(roll_error > tilt_threshold_rad, pitch_error > tilt_threshold_rad)
+            if torch.any(extreme_tilt):
+                time_out = torch.ones_like(time_out)
+        workspace_escape = self._get_workspace_escape_mask()
+        if torch.any(workspace_escape):
+            time_out = torch.ones_like(time_out)
         if torch.any(time_out):
             time_out = torch.ones_like(time_out)
         return time_out, time_out
@@ -673,6 +709,8 @@ class FactoryEnv(DirectRLEnv):
             held_base_pos[:, 2] > float(self.cfg_task.z_action_penalty_height_threshold)
         ).float()
         z_action_penalty = z_action_penalty * z_gate
+        roll_error, pitch_error = self._get_upright_errors()
+        upright_penalty = torch.sqrt(roll_error.square() + pitch_error.square())
         curr_engaged = self._get_curr_successes(success_threshold=self.cfg_task.engage_threshold, check_rot=False)
 
         rew_dict = {
@@ -683,6 +721,7 @@ class FactoryEnv(DirectRLEnv):
             "action_grad_penalty": action_grad_penalty,
             "yaw_action_penalty": yaw_action_penalty,
             "z_action_penalty": z_action_penalty,
+            "upright_penalty": upright_penalty,
             "curr_engaged": curr_engaged.float(),
             "curr_success": curr_successes.float(),
         }
@@ -694,6 +733,7 @@ class FactoryEnv(DirectRLEnv):
             "action_grad_penalty": -self.cfg_task.action_grad_penalty_scale,
             "yaw_action_penalty": -self.cfg_task.yaw_action_penalty_scale,
             "z_action_penalty": -self.cfg_task.z_action_penalty_scale,
+            "upright_penalty": -self.cfg_task.upright_penalty_scale,
             "curr_engaged": 1.0,
             "curr_success": 1.0,
         }

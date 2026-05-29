@@ -60,6 +60,12 @@ class FactoryTask:
 
     # Action
     unidirectional_rot: bool = False
+    disable_action_shaping: bool = False
+    upright_roll_target_rad: float = 3.14159
+    upright_pitch_target_rad: float = 0.0
+    upright_penalty_scale: float = 0.0
+    upright_tilt_termination_deg: float = 0.0
+    workspace_escape_bounds_scale: float = 0.0
 
     # Fixed Asset (applies to all tasks)
     fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.05]

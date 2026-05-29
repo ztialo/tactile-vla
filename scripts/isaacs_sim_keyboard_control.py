@@ -51,6 +51,7 @@ LIVE_FT_PLOT_UPDATE_HZ = 8.0
 LIVE_FT_PLOT_WINDOW_SECONDS = 20.0
 LIVE_FT_FORCE_Y_LIMIT = 10.0
 LIVE_FT_TORQUE_Y_LIMIT = 0.2
+FT_LOG_HZ = 30.0
 
 
 # Robot and target configuration.
@@ -202,6 +203,24 @@ def _ensure_isaac_imports() -> None:
     ArticulationAction = _ArticulationAction
     create_prim = _create_prim
     is_prim_path_valid = _is_prim_path_valid
+
+
+def _suppress_viewport_notifications() -> None:
+    """Best-effort suppression of Isaac Sim viewport notifications/popups."""
+    if carb is None:
+        return
+    try:
+        settings = carb.settings.get_settings()
+    except Exception:
+        return
+    for key, value in (
+        ("/app/notifications/enabled", False),
+        ("/exts/omni.kit.notification_manager/enabled", False),
+    ):
+        try:
+            settings.set(key, value)
+        except Exception:
+            continue
 
 
 class FR3DifferentialIKController:
@@ -684,6 +703,7 @@ class FrankaTeleopAttachRuntime:
         self._ft_log_file = None
         self._ft_log_writer = None
         self._ft_log_path: Optional[Path] = None
+        self._ft_log_last_write_s = 0.0
         self._ft_link_ids: Optional[dict[str, int]] = None
         self._ft_link_names: Optional[dict[str, str]] = None
         self._warned_ft_joint_force_missing = False
@@ -698,8 +718,6 @@ class FrankaTeleopAttachRuntime:
         self._live_plot_right_pad_values: dict[str, deque[float]] = {}
         self._live_plot_left_base_values: dict[str, deque[float]] = {}
         self._live_plot_right_base_values: dict[str, deque[float]] = {}
-        self._live_plot_left_net_force_values: deque[float] = deque()
-        self._live_plot_right_net_force_values: deque[float] = deque()
         self._live_plot_plt = None
         self._live_plot_fig = None
         self._live_plot_axes_by_name: dict[str, Any] = {}
@@ -738,8 +756,10 @@ class FrankaTeleopAttachRuntime:
         self._ft_link_names = None
         self._warned_ft_joint_force_missing = False
         self._printed_ft_joint_resolution = False
+        self._ft_log_last_write_s = 0.0
 
     def start(self) -> None:
+        _suppress_viewport_notifications()
         stage = omni.usd.get_context().get_stage()
         if stage is None:
             raise RuntimeError("No USD stage is currently open in Isaac Sim.")
@@ -937,23 +957,17 @@ class FrankaTeleopAttachRuntime:
             return
 
         try:
+            try:
+                plt.rcParams["figure.raise_window"] = False
+            except Exception:
+                pass
             plt.ion()
-            fig, axs = plt.subplots(len(axes) + 1, 1, num="Live FT", sharex=True)
+            fig, axs = plt.subplots(len(axes), 1, num="Live FT", sharex=True)
             ax_list = list(np.atleast_1d(axs).reshape(-1))
             axis_to_ax: dict[str, Any] = {}
             axis_to_lines: dict[str, dict[str, Any]] = {}
 
-            net_ax = ax_list[0]
-            (left_net_line,) = net_ax.plot([], [], label="left_net_force", linewidth=1.4)
-            (right_net_line,) = net_ax.plot([], [], label="right_net_force", linewidth=1.4)
-            net_ax.set_ylabel("net [N]")
-            net_ax.set_ylim(0.0, float(LIVE_FT_FORCE_Y_LIMIT))
-            net_ax.grid(True, alpha=0.3)
-            net_ax.legend(loc="best")
-            axis_to_ax["net_force"] = net_ax
-            axis_to_lines["net_force"] = {"left_net": left_net_line, "right_net": right_net_line}
-
-            for axis, ax in zip(axes, ax_list[1:]):
+            for axis, ax in zip(axes, ax_list):
                 unit = "N" if axis.startswith("f") else "N*m"
                 (left_pad_line,) = ax.plot([], [], label=f"left_pad_{axis}", linewidth=1.2)
                 (right_pad_line,) = ax.plot([], [], label=f"right_pad_{axis}", linewidth=1.2)
@@ -970,7 +984,7 @@ class FrankaTeleopAttachRuntime:
                 elif axis.startswith("t"):
                     ax.set_ylim(-float(LIVE_FT_TORQUE_Y_LIMIT), float(LIVE_FT_TORQUE_Y_LIMIT))
                 ax.grid(True, alpha=0.3)
-                ax.legend(loc="best")
+                ax.legend(loc="center left", bbox_to_anchor=(1.005, 0.5), borderaxespad=0.0, fontsize="small")
                 axis_to_ax[axis] = ax
                 axis_to_lines[axis] = {
                     "left_pad": left_pad_line,
@@ -982,7 +996,7 @@ class FrankaTeleopAttachRuntime:
                 }
             if ax_list:
                 ax_list[-1].set_xlabel("time [s] from plot start")
-            fig.tight_layout()
+            fig.tight_layout(rect=(0.0, 0.0, 0.9, 1.0))
         except Exception as exc:
             print(f"[WARN] Failed to initialize live FT plot window: {exc}", flush=True)
             return
@@ -997,8 +1011,6 @@ class FrankaTeleopAttachRuntime:
         self._live_plot_right_pad_values = {axis: deque() for axis in self._live_plot_axes}
         self._live_plot_left_base_values = {axis: deque() for axis in self._live_plot_axes}
         self._live_plot_right_base_values = {axis: deque() for axis in self._live_plot_axes}
-        self._live_plot_left_net_force_values = deque()
-        self._live_plot_right_net_force_values = deque()
         self._live_plot_plt = plt
         self._live_plot_fig = fig
         self._live_plot_axes_by_name = axis_to_ax
@@ -1021,8 +1033,6 @@ class FrankaTeleopAttachRuntime:
         self._live_plot_right_pad_values = {}
         self._live_plot_left_base_values = {}
         self._live_plot_right_base_values = {}
-        self._live_plot_left_net_force_values = deque()
-        self._live_plot_right_net_force_values = deque()
         self._live_plot_plt = None
         self._live_plot_fig = None
         self._live_plot_axes_by_name = {}
@@ -1068,27 +1078,10 @@ class FrankaTeleopAttachRuntime:
             self._live_plot_left_base_values[axis].append(_extract_axis_value(left_base_wrench, axis_index))
             self._live_plot_right_base_values[axis].append(_extract_axis_value(right_base_wrench, axis_index))
 
-        def _net_force_value(pad_wrench: Optional[np.ndarray], base_wrench: Optional[np.ndarray]) -> float:
-            if pad_wrench is None or base_wrench is None:
-                return float("nan")
-            pad_arr = np.asarray(pad_wrench, dtype=np.float64).reshape(-1)
-            base_arr = np.asarray(base_wrench, dtype=np.float64).reshape(-1)
-            if pad_arr.size < 3 or base_arr.size < 3:
-                return float("nan")
-            value = float(np.linalg.norm(pad_arr[:3] - base_arr[:3]))
-            return value if math.isfinite(value) else float("nan")
-
-        self._live_plot_left_net_force_values.append(_net_force_value(left_pad_wrench, left_base_wrench))
-        self._live_plot_right_net_force_values.append(_net_force_value(right_pad_wrench, right_base_wrench))
-
         window_s = float(LIVE_FT_PLOT_WINDOW_SECONDS)
         if window_s > 0.0:
             while self._live_plot_times and (t_rel - self._live_plot_times[0]) > window_s:
                 self._live_plot_times.popleft()
-                if self._live_plot_left_net_force_values:
-                    self._live_plot_left_net_force_values.popleft()
-                if self._live_plot_right_net_force_values:
-                    self._live_plot_right_net_force_values.popleft()
                 for axis in self._live_plot_axes:
                     if self._live_plot_left_pad_values[axis]:
                         self._live_plot_left_pad_values[axis].popleft()
@@ -1107,17 +1100,6 @@ class FrankaTeleopAttachRuntime:
 
         try:
             times = list(self._live_plot_times)
-            net_lines = self._live_plot_lines["net_force"]
-            net_ax = self._live_plot_axes_by_name["net_force"]
-            net_lines["left_net"].set_data(times, list(self._live_plot_left_net_force_values))
-            net_lines["right_net"].set_data(times, list(self._live_plot_right_net_force_values))
-            net_ax.relim()
-            net_ax.autoscale_view()
-            net_ax.set_ylim(0.0, float(LIVE_FT_FORCE_Y_LIMIT))
-            if window_s > 0.0:
-                xmin = max(0.0, t_rel - window_s)
-                xmax = max(t_rel, xmin + 1e-3)
-                net_ax.set_xlim(xmin, xmax)
             for axis in self._live_plot_axes:
                 axis_lines = self._live_plot_lines[axis]
                 ax_obj = self._live_plot_axes_by_name[axis]
@@ -1145,7 +1127,10 @@ class FrankaTeleopAttachRuntime:
                     xmax = max(t_rel, xmin + 1e-3)
                     ax_obj.set_xlim(xmin, xmax)
             self._live_plot_fig.canvas.draw_idle()
-            self._live_plot_plt.pause(0.001)
+            try:
+                self._live_plot_fig.canvas.flush_events()
+            except Exception:
+                self._live_plot_plt.pause(0.001)
         except Exception as exc:
             print(f"[WARN] Live FT plot update failed; disabling plot window: {exc}", flush=True)
             self._teardown_live_ft_plot()
@@ -1160,6 +1145,11 @@ class FrankaTeleopAttachRuntime:
     ) -> None:
         if self._ft_log_writer is None or self._ft_log_file is None:
             return
+        now_monotonic = time.monotonic()
+        min_period = 1.0 / float(max(FT_LOG_HZ, 0.5))
+        if (now_monotonic - self._ft_log_last_write_s) < min_period:
+            return
+        self._ft_log_last_write_s = now_monotonic
         now = datetime.now(timezone.utc)
         left_pad_w = None if left_pad_wrench is None else np.asarray(left_pad_wrench, dtype=np.float64).reshape(-1)
         right_pad_w = None if right_pad_wrench is None else np.asarray(right_pad_wrench, dtype=np.float64).reshape(-1)
@@ -1270,17 +1260,17 @@ class FrankaTeleopAttachRuntime:
                     self._step_keyboard_position(np.asarray([1.0, 0.0, 0.0], dtype=np.float64) * KEYBOARD_POSITION_STEP_M)
                 elif key_id in KEYBOARD_BACKWARD_KEYS:
                     self._step_keyboard_position(np.asarray([-1.0, 0.0, 0.0], dtype=np.float64) * KEYBOARD_POSITION_STEP_M)
-                elif key_id == "Q":
+                elif key_id == "Y":
                     self._step_keyboard_orientation(np.asarray([1.0, 0.0, 0.0], dtype=np.float64), KEYBOARD_ROTATION_STEP_RAD)
-                elif key_id == "W":
+                elif key_id == "U":
                     self._step_keyboard_orientation(np.asarray([1.0, 0.0, 0.0], dtype=np.float64), -KEYBOARD_ROTATION_STEP_RAD)
-                elif key_id == "A":
+                elif key_id == "H":
                     self._step_keyboard_orientation(np.asarray([0.0, 1.0, 0.0], dtype=np.float64), KEYBOARD_ROTATION_STEP_RAD)
-                elif key_id == "S":
+                elif key_id == "J":
                     self._step_keyboard_orientation(np.asarray([0.0, 1.0, 0.0], dtype=np.float64), -KEYBOARD_ROTATION_STEP_RAD)
-                elif key_id == "Z":
+                elif key_id == "N":
                     self._step_keyboard_orientation(np.asarray([0.0, 0.0, 1.0], dtype=np.float64), KEYBOARD_ROTATION_STEP_RAD)
-                elif key_id == "X":
+                elif key_id == "M":
                     self._step_keyboard_orientation(np.asarray([0.0, 0.0, 1.0], dtype=np.float64), -KEYBOARD_ROTATION_STEP_RAD)
                 elif key_id == "O":
                     self._step_gripper_target(KEYBOARD_GRIPPER_COARSE_STEP)
