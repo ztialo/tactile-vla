@@ -704,7 +704,12 @@ class FactoryEnv(DirectRLEnv):
         self.ft_substep_idx = 0
         self.left_ft_wrench_substeps.zero_()
         self.right_ft_wrench_substeps.zero_()
-        self.actions = self.ema_factor * action.clone().to(self.device) + (1 - self.ema_factor) * self.actions
+        incoming_action = action.clone().to(self.device)
+        disable_action_shaping = bool(getattr(self.cfg_task, "disable_action_shaping", False))
+        if disable_action_shaping:
+            self.actions = incoming_action
+        else:
+            self.actions = self.ema_factor * incoming_action + (1 - self.ema_factor) * self.actions
 
     def _record_ft_substep(self):
         """Record one physics-rate FT sample during the decimation loop."""
