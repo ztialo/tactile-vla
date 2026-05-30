@@ -92,7 +92,7 @@ training:
   debug: False
   resume: False
   lr_scheduler: cosine
-  lr_warmup_steps: 1000
+  lr_warmup_steps: 250  # 1000 for batch size 64
   num_epochs: 150
   gradient_accumulate_every: 13 # 1 for batch size 64
   use_ema: True
