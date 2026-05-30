@@ -700,6 +700,7 @@ class FactoryEnv(DirectRLEnv):
         # Action penalties.
         action_penalty_ee = torch.norm(self.actions, p=2)
         action_grad_penalty = torch.norm(self.actions - self.prev_actions, p=2, dim=-1)
+        ee_linvel_z_penalty = torch.abs(self.fingertip_midpoint_linvel[:, 2])
         yaw_action_penalty = self.actions[:, 5] ** 2
         z_action_penalty = torch.clamp(-self.actions[:, 2], min=0.0) ** 2
         yaw_gate = (
@@ -720,6 +721,7 @@ class FactoryEnv(DirectRLEnv):
             "kp_fine": factory_utils.squashing_fn(keypoint_dist, a2, b2),
             "action_penalty_ee": action_penalty_ee,
             "action_grad_penalty": action_grad_penalty,
+            "ee_linvel_z_penalty": ee_linvel_z_penalty,
             "yaw_action_penalty": yaw_action_penalty,
             "z_action_penalty": z_action_penalty,
             "upright_penalty": upright_penalty,
@@ -732,6 +734,7 @@ class FactoryEnv(DirectRLEnv):
             "kp_fine": 1.0,
             "action_penalty_ee": -self.cfg_task.action_penalty_ee_scale,
             "action_grad_penalty": -self.cfg_task.action_grad_penalty_scale,
+            "ee_linvel_z_penalty": -self.cfg_task.ee_linvel_z_penalty_scale,
             "yaw_action_penalty": -self.cfg_task.yaw_action_penalty_scale,
             "z_action_penalty": -self.cfg_task.z_action_penalty_scale,
             "upright_penalty": -self.cfg_task.upright_penalty_scale,

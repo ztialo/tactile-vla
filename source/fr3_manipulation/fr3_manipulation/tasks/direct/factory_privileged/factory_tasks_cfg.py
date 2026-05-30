@@ -81,6 +81,7 @@ class FactoryTask:
     ee_success_yaw: float = 0.0  # nut_thread task only.
     action_penalty_ee_scale: float = 0.0
     action_grad_penalty_scale: float = 0.0
+    ee_linvel_z_penalty_scale: float = 0.15
     yaw_action_penalty_scale: float = 0.0
     yaw_action_penalty_height_threshold: float = 0.0
     z_action_penalty_scale: float = 0.0
