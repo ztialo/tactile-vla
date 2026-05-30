@@ -399,7 +399,12 @@ class FactoryEnv(DirectRLEnv):
                 xy_noise = torch.clamp(xy_noise, -self.current_actor_xy_noise, self.current_actor_xy_noise)
                 self.actor_held_xy_offset[env_ids] = xy_noise
 
-        self.actions = self.ema_factor * action.clone().to(self.device) + (1 - self.ema_factor) * self.actions
+        incoming_action = action.clone().to(self.device)
+        disable_action_shaping = bool(getattr(self.cfg_task, "disable_action_shaping", False))
+        if disable_action_shaping:
+            self.actions = incoming_action
+        else:
+            self.actions = self.ema_factor * incoming_action + (1 - self.ema_factor) * self.actions
         if self.pre_action_wait_steps > 0:
             hold_mask = self.episode_length_buf < self.pre_action_wait_steps
             if torch.any(hold_mask):

@@ -58,7 +58,7 @@ class FactoryTask:
 
     # Action
     unidirectional_rot: bool = False
-    disable_action_shaping: bool = False
+    disable_action_shaping: bool = True
     upright_roll_target_rad: float = 3.14159
     upright_pitch_target_rad: float = 0.0
     upright_penalty_scale: float = 0.0

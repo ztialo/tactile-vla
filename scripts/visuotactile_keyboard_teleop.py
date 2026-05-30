@@ -154,6 +154,9 @@ def _apply_factory_init_overrides(env_cfg):
     task_cfg = getattr(env_cfg, "task", None)
     if task_cfg is None:
         return
+    if hasattr(task_cfg, "disable_action_shaping"):
+        task_cfg.disable_action_shaping = True
+        print("[INFO] Action shaping disabled for teleop.")
     if args_cli.hand_init_height is not None and hasattr(task_cfg, "hand_init_pos"):
         hand_init_pos = list(task_cfg.hand_init_pos)
         hand_init_pos[2] = float(args_cli.hand_init_height)
@@ -239,19 +242,19 @@ class KeyboardTeleopController:
             action[:, 0] += 1.0
         if self._pressed_keys & KEYBOARD_BACKWARD_KEYS:
             action[:, 0] -= 1.0
-        if "Q" in self._pressed_keys:
+        if "Y" in self._pressed_keys:
             action[:, 3] += 1.0
-        if "W" in self._pressed_keys:
+        if "U" in self._pressed_keys:
             action[:, 3] -= 1.0
-        if "A" in self._pressed_keys:
+        if "H" in self._pressed_keys:
             action[:, 4] += 1.0
-        if "S" in self._pressed_keys:
+        if "J" in self._pressed_keys:
             action[:, 4] -= 1.0
-        if "Z" in self._pressed_keys:
+        if "N" in self._pressed_keys:
             action[:, 5] += 1.0
-        if "X" in self._pressed_keys:
+        if "M" in self._pressed_keys:
             action[:, 5] -= 1.0
-        return torch.clamp(action, -1.0, 1.0)
+        return action
 
 
 class VisuotactileEpisodeRecorder:
@@ -399,7 +402,7 @@ class TeleopControlWindow:
             with ui.VStack(spacing=8):
                 ui.Label("Gear-Mesh Visuotactile Keyboard Teleop")
                 ui.Label("Move: arrows=Y/Z, comma/period=X")
-                ui.Label("Rotate: Q/W=roll, A/S=pitch, Z/X=yaw")
+                ui.Label("Rotate: Y/U=roll, H/J=pitch, N/M=yaw")
                 ui.Label("Buttons affect the current buffered demo.")
                 ui.Label("", model=self._status, word_wrap=True, height=60)
                 with ui.HStack(height=32):
