@@ -29,3 +29,17 @@ May need:
 ```bash
 export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6:/lib/x86_64-linux-gnu/libgcc_s.so.1
 ```
+
+##Finetune teacher approach z vel 
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Privileged-Factory-GearMesh-Direct-v0 \
+  --experiment_name factory_privileged \
+  --resume \
+  --load_run 2026-05-30_19-18-22_teacher \
+  --checkpoint model_298.pt \
+  --max_iterations 100 \
+  --fixed_asset_height \
+  task.z_action_penalty_height_threshold=0.015
+```

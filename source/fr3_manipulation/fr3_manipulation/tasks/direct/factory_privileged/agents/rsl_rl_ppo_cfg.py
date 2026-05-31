@@ -34,7 +34,7 @@ class RslRlPpoAlgorithmCompatCfg:
 class FactoryPrivilegedPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 128
     max_iterations = 200
-    save_interval = 50
+    save_interval = 25
     experiment_name = "factory_privileged"
     run_name = "teacher"
     obs_groups = {"policy": ["policy"], "critic": ["critic"]}

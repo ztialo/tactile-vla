@@ -708,12 +708,23 @@ class FactoryEnv(DirectRLEnv):
         ).float()
         yaw_action_penalty = yaw_action_penalty * yaw_gate
         z_gate = (
-            held_base_pos[:, 2] > float(self.cfg_task.z_action_penalty_height_threshold)
+            z_disp > float(self.cfg_task.z_action_penalty_height_threshold)
         ).float()
         z_action_penalty = z_action_penalty * z_gate
         roll_error, pitch_error = self._get_upright_errors()
         upright_penalty = torch.sqrt(roll_error.square() + pitch_error.square())
         curr_engaged = self._get_curr_successes(success_threshold=self.cfg_task.engage_threshold, check_rot=False)
+        abs_ee_z_linvel = torch.abs(self.fingertip_midpoint_linvel[:, 2])
+
+        def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+            if torch.any(mask):
+                return values[mask].mean()
+            return torch.zeros((), device=self.device)
+
+        baseline_mask = torch.logical_not(curr_engaged)
+        coarse_mask = torch.logical_and(curr_engaged, torch.logical_not(curr_successes))
+        mean_abs_z_linvel_baseline = _masked_mean(abs_ee_z_linvel, baseline_mask)
+        mean_abs_z_linvel_coarse = _masked_mean(abs_ee_z_linvel, coarse_mask)
 
         rew_dict = {
             "kp_baseline": factory_utils.squashing_fn(keypoint_dist, a0, b0),
@@ -740,6 +751,12 @@ class FactoryEnv(DirectRLEnv):
             "upright_penalty": -self.cfg_task.upright_penalty_scale,
             "curr_engaged": 1.0,
             "curr_success": 1.0,
+        }
+        self.extras["log"] = {
+            "mean_abs_z_linvel_baseline": mean_abs_z_linvel_baseline.detach(),
+            "mean_abs_z_linvel_coarse": mean_abs_z_linvel_coarse.detach(),
+            "baseline_env_fraction": baseline_mask.float().mean().detach(),
+            "coarse_env_fraction": coarse_mask.float().mean().detach(),
         }
         return rew_dict, rew_scales
 
