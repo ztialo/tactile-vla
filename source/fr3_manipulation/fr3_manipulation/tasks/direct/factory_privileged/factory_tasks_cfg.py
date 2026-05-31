@@ -85,7 +85,7 @@ class FactoryTask:
     yaw_action_penalty_scale: float = 0.0
     yaw_action_penalty_height_threshold: float = 0.0
     z_action_penalty_scale: float = 3.0
-    z_action_penalty_height_threshold: float = 0.0
+    z_action_penalty_height_threshold: float = 0.035
     # Reward function details can be found in Appendix B of https://arxiv.org/pdf/2408.04587.
     # Multi-scale keypoints are used to capture different phases of the task.
     # Each reward passes the keypoint distance, x, through a squashing function:
