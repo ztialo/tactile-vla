@@ -30,7 +30,7 @@ May need:
 export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6:/lib/x86_64-linux-gnu/libgcc_s.so.1
 ```
 
-##Finetune teacher approach z vel 
+## Finetune teacher approach z vel 
 
 ```bash
 python scripts/rsl_rl/train.py \
@@ -41,5 +41,5 @@ python scripts/rsl_rl/train.py \
   --checkpoint model_298.pt \
   --max_iterations 100 \
   --fixed_asset_height \
-  task.z_action_penalty_height_threshold=0.015
+  --headless
 ```

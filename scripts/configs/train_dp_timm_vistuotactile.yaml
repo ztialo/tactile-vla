@@ -127,7 +127,7 @@ checkpoint:
   topk:
     monitor_key: val_loss
     mode: min
-    k: 15
+    k: 7
     format_str: 'epoch={epoch:04d}-val_loss={val_loss:.4f}.ckpt'
   save_last_ckpt: False
   save_last_snapshot: False
