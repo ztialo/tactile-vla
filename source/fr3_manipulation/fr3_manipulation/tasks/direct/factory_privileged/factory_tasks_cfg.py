@@ -84,7 +84,6 @@ class FactoryTask:
     ee_linvel_z_penalty_scale: float = 0.0
     yaw_action_penalty_scale: float = 0.0
     yaw_action_penalty_height_threshold: float = 0.0
-<<<<<<< HEAD
     z_action_penalty_scale: float = 0.0 # 3.0 for gear mesh fine tune off of baseline policy
     z_action_penalty_height_threshold: float = 0.0 #0.035 for gear mesh fine tune off of baseline policy
     # Reward function details can be found in Appendix B of https://arxiv.org/pdf/2408.04587.
