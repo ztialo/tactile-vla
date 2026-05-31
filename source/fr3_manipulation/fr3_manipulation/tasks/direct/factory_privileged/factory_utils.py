@@ -5,6 +5,7 @@
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 import isaacsim.core.utils.torch as torch_utils
 
@@ -114,3 +115,18 @@ def collapse_obs_dict(obs_dict, obs_order):
     obs_tensors = [obs_dict[obs_name] for obs_name in obs_order]
     obs_tensors = torch.cat(obs_tensors, dim=-1)
     return obs_tensors
+
+
+def moving_average_ft_torch(values: torch.Tensor, window: int) -> torch.Tensor:
+    """Apply dataset-style causal FT moving average with edge padding over time."""
+    if window <= 1:
+        return values
+    if values.ndim != 3:
+        raise ValueError(f"Expected FT tensor with shape [B, T, C], got {tuple(values.shape)}")
+    if values.shape[1] == 0:
+        return values
+
+    padded = torch.cat((values[:, :1, :].expand(-1, window - 1, -1), values), dim=1)
+    padded = padded.transpose(1, 2)
+    filtered = F.avg_pool1d(padded, kernel_size=window, stride=1)
+    return filtered.transpose(1, 2)

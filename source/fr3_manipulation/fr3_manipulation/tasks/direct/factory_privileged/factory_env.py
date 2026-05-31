@@ -168,6 +168,15 @@ class FactoryEnv(DirectRLEnv):
         self.fingertip_body_idx = self._get_body_index("fr3_hand_tcp", "fr3_hand")
         self.left_ft_body_idx = self._get_body_index("fr3_left_ft_pad", "fr3_left_ft_base", "fr3_left_ft")
         self.right_ft_body_idx = self._get_body_index("fr3_right_ft_pad", "fr3_right_ft_base", "fr3_right_ft")
+        self.left_ft_wrench_substeps = torch.zeros((self.num_envs, self.cfg.decimation, 6), device=self.device)
+        self.right_ft_wrench_substeps = torch.zeros((self.num_envs, self.cfg.decimation, 6), device=self.device)
+        self.ft_substep_idx = 0
+        self.ft_history_len = int(getattr(self.cfg, "ft_history_len", 16))
+        self.ft_ma_window = int(getattr(self.cfg, "ft_ma_window", 10))
+        self.negate_ft = bool(getattr(self.cfg, "negate_ft", True))
+        self.left_ft_wrench_history_raw = torch.zeros((self.num_envs, self.ft_history_len, 6), device=self.device)
+        self.right_ft_wrench_history_raw = torch.zeros((self.num_envs, self.ft_history_len, 6), device=self.device)
+        self.ft_history_valid_count = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
 
         # Tensors for finite-differencing.
         self.last_update_timestamp = 0.0  # Note: This is for finite differencing body velocities.
@@ -332,6 +341,32 @@ class FactoryEnv(DirectRLEnv):
         )
 
         prev_actions = self.actions.clone()
+        current_left_flat = self.left_ft_wrench_substeps[:, : self.ft_substep_idx].reshape(self.num_envs, -1, 6)
+        current_right_flat = self.right_ft_wrench_substeps[:, : self.ft_substep_idx].reshape(self.num_envs, -1, 6)
+        left_ft_history = torch.cat((self.left_ft_wrench_history_raw, current_left_flat), dim=1)[:, -self.ft_history_len :]
+        right_ft_history = torch.cat((self.right_ft_wrench_history_raw, current_right_flat), dim=1)[
+            :, -self.ft_history_len :
+        ]
+        valid_count = torch.clamp(self.ft_history_valid_count + current_left_flat.shape[1], max=self.ft_history_len)
+        missing = self.ft_history_len - valid_count
+        if torch.any(torch.logical_and(missing > 0, valid_count > 0)):
+            left_ft_history = left_ft_history.clone()
+            right_ft_history = right_ft_history.clone()
+            valid_missing = missing[torch.logical_and(missing > 0, valid_count > 0)]
+            for missing_count in torch.unique(valid_missing).tolist():
+                env_mask = torch.logical_and(missing == int(missing_count), valid_count > 0)
+                first_valid_idx = int(missing_count)
+                left_ft_history[env_mask, :first_valid_idx] = left_ft_history[env_mask, first_valid_idx].unsqueeze(1)
+                right_ft_history[env_mask, :first_valid_idx] = right_ft_history[env_mask, first_valid_idx].unsqueeze(1)
+        if self.negate_ft:
+            left_ft_history = -left_ft_history
+            right_ft_history = -right_ft_history
+        left_ft_history = factory_utils.moving_average_ft_torch(left_ft_history, self.ft_ma_window).reshape(
+            self.num_envs, -1
+        )
+        right_ft_history = factory_utils.moving_average_ft_torch(right_ft_history, self.ft_ma_window).reshape(
+            self.num_envs, -1
+        )
 
         obs_dict = {
             "fingertip_pos": self.fingertip_midpoint_pos,
@@ -341,6 +376,8 @@ class FactoryEnv(DirectRLEnv):
             "ee_angvel": self.ee_angvel_fd,
             "left_ft_wrench": self.left_ft_wrench,
             "right_ft_wrench": self.right_ft_wrench,
+            "left_ft_wrench_history": left_ft_history,
+            "right_ft_wrench_history": right_ft_history,
             "prev_actions": prev_actions,
         }
 
@@ -363,6 +400,8 @@ class FactoryEnv(DirectRLEnv):
             "rot_threshold": self.rot_threshold,
             "left_ft_wrench": self.left_ft_wrench,
             "right_ft_wrench": self.right_ft_wrench,
+            "left_ft_wrench_history": left_ft_history,
+            "right_ft_wrench_history": right_ft_history,
             "prev_actions": prev_actions,
         }
         noisy_state_dict = dict(state_dict)
@@ -384,6 +423,9 @@ class FactoryEnv(DirectRLEnv):
         self.ep_succeeded[env_ids] = 0
         self.ep_success_times[env_ids] = 0
         self.actor_held_xy_offset[env_ids] = 0.0
+        self.left_ft_wrench_history_raw[env_ids] = 0.0
+        self.right_ft_wrench_history_raw[env_ids] = 0.0
+        self.ft_history_valid_count[env_ids] = 0
 
     def _pre_physics_step(self, action):
         """Apply policy actions with smoothing."""
@@ -399,6 +441,19 @@ class FactoryEnv(DirectRLEnv):
                 xy_noise = torch.clamp(xy_noise, -self.current_actor_xy_noise, self.current_actor_xy_noise)
                 self.actor_held_xy_offset[env_ids] = xy_noise
 
+        if self.ft_substep_idx > 0:
+            current_left_flat = self.left_ft_wrench_substeps[:, : self.ft_substep_idx].reshape(self.num_envs, -1, 6)
+            current_right_flat = self.right_ft_wrench_substeps[:, : self.ft_substep_idx].reshape(self.num_envs, -1, 6)
+            self.left_ft_wrench_history_raw = torch.cat(
+                (self.left_ft_wrench_history_raw, current_left_flat), dim=1
+            )[:, -self.ft_history_len :]
+            self.right_ft_wrench_history_raw = torch.cat(
+                (self.right_ft_wrench_history_raw, current_right_flat), dim=1
+            )[:, -self.ft_history_len :]
+            self.ft_history_valid_count = torch.clamp(self.ft_history_valid_count + current_left_flat.shape[1], max=self.ft_history_len)
+        self.ft_substep_idx = 0
+        self.left_ft_wrench_substeps.zero_()
+        self.right_ft_wrench_substeps.zero_()
         incoming_action = action.clone().to(self.device)
         self.actions = self.ema_factor * incoming_action + (1 - self.ema_factor) * self.actions
         if self.pre_action_wait_steps > 0:
@@ -406,6 +461,18 @@ class FactoryEnv(DirectRLEnv):
             if torch.any(hold_mask):
                 self.actions = self.actions.clone()
                 self.actions[hold_mask] = 0.0
+
+    def _record_ft_substep(self):
+        """Record one physics-rate FT sample during the decimation loop."""
+        if self.ft_substep_idx >= self.left_ft_wrench_substeps.shape[1]:
+            return
+        self.left_ft_wrench_substeps[:, self.ft_substep_idx] = self._robot.data.body_incoming_joint_wrench_b[
+            :, self.left_ft_body_idx
+        ]
+        self.right_ft_wrench_substeps[:, self.ft_substep_idx] = self._robot.data.body_incoming_joint_wrench_b[
+            :, self.right_ft_body_idx
+        ]
+        self.ft_substep_idx += 1
 
     def close_gripper_in_place(self):
         """Keep gripper in current position as gripper closes."""
@@ -453,6 +520,7 @@ class FactoryEnv(DirectRLEnv):
         # Check if we need to re-compute velocities within the decimation loop.
         if self.last_update_timestamp < self._robot._data._sim_timestamp:
             self._compute_intermediate_values(dt=self.physics_dt)
+        self._record_ft_substep()
         disable_action_shaping = bool(getattr(self.cfg_task, "disable_action_shaping", False))
 
         # Interpret actions as target pos displacements and set pos target
@@ -844,6 +912,7 @@ class FactoryEnv(DirectRLEnv):
             held_asset_relative_pos = factory_utils.get_held_base_pos_local(
                 self.cfg_task.name, self.cfg_task.fixed_asset_cfg, self.num_envs, self.device
             )
+            held_asset_relative_pos[:, 2] += self.cfg_task.held_asset_grasp_z_offset
         else:
             raise NotImplementedError("Task not implemented")
 

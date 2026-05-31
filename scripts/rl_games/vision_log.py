@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Collect vision rollouts from an RL-Games checkpoint into HDF5."""
+"""Collect rollout data, including FT by default, from an RL-Games checkpoint into HDF5."""
 
 """Launch Isaac Sim Simulator first."""
 
@@ -15,7 +15,7 @@ import sys
 from isaaclab.app import AppLauncher
 
 # add argparse arguments
-parser = argparse.ArgumentParser(description="Log vision rollouts from an RL-Games checkpoint.")
+parser = argparse.ArgumentParser(description="Log rollout data from an RL-Games checkpoint.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during rollout.")
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument(
@@ -45,6 +45,18 @@ parser.add_argument(
     help="When no checkpoint provided, use the last saved model. Otherwise use the best saved model.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument(
+    "--disable_action_shaping",
+    action="store_true",
+    default=False,
+    help="Disable task-space workspace clipping and upright overwrite in _apply_action().",
+)
+parser.add_argument(
+    "--enable_action_shaping",
+    action="store_true",
+    default=False,
+    help="Force task-space workspace clipping and upright overwrite in _apply_action().",
+)
 parser.add_argument(
     "--log_path",
     type=str,
@@ -122,6 +134,18 @@ parser.add_argument(
     type=float,
     default=1.0,
     help="Hold the robot still for this many seconds at the start of each episode before running the policy.",
+)
+parser.add_argument(
+    "--ft_log_hz",
+    type=float,
+    default=None,
+    help="Saved FT frequency. Defaults to physics_hz.",
+)
+parser.add_argument(
+    "--log_ft",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Log force-torque wrench data. Enabled by default.",
 )
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -254,7 +278,7 @@ def _normalize_wrapper_obs_groups(obs_groups: dict | None) -> dict[str, list[str
     return {"obs": list(obs_groups.get("policy", ["policy"])), "states": list(obs_groups.get("critic", []))}
 
 
-def _alias_teacher_policy_as_policy(base_env):
+def _alias_teacher_policy_as_policy(base_env, policy_dim_hint: int | None = None):
     """Route teacher_policy through policy and patch policy observation space shape."""
     original_get_observations = base_env._get_observations
 
@@ -269,13 +293,19 @@ def _alias_teacher_policy_as_policy(base_env):
     base_env._get_observations = _patched_get_observations
 
     # RL-Games wrapper validates groups against single_observation_space; patch policy shape to teacher dim.
-    teacher_obs = original_get_observations().get("teacher_policy")
-    if teacher_obs is None:
-        raise KeyError("Expected 'teacher_policy' while patching policy observation space.")
-    policy_dim = int(teacher_obs.shape[-1])
     obs_space = base_env.single_observation_space
     if not hasattr(obs_space, "spaces") or not isinstance(obs_space.spaces, dict):
         raise TypeError("single_observation_space is expected to expose a mutable '.spaces' dictionary.")
+    teacher_space = obs_space.spaces.get("teacher_policy")
+    if policy_dim_hint is not None:
+        policy_dim = int(policy_dim_hint)
+    if teacher_space is not None and hasattr(teacher_space, "shape") and teacher_space.shape is not None:
+        policy_dim = int(teacher_space.shape[-1])
+    elif policy_dim_hint is None:
+        raise KeyError(
+            "Could not infer teacher_policy observation dim from observation space. "
+            "Pass a policy_dim_hint from the checkpoint inspection path."
+        )
     obs_space.spaces["policy"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(policy_dim,), dtype=np.float32)
     print(f"[INFO] Aliased teacher_policy -> policy with policy obs dim = {policy_dim}.")
 
@@ -375,10 +405,52 @@ def _center_bottom_crop(image: torch.Tensor, crop_height: int, crop_width: int) 
     return image[..., top : top + crop_height, left : left + crop_width, :]
 
 
+def _drop_startup_ft_substep(ft_wrench: torch.Tensor, timestep_in_episode: torch.Tensor) -> torch.Tensor:
+    if ft_wrench.ndim != 3 or ft_wrench.shape[1] < 2:
+        return ft_wrench
+    start_mask = timestep_in_episode == 0
+    if not torch.any(start_mask):
+        return ft_wrench
+    ft_wrench = ft_wrench.clone()
+    start_indices = start_mask.nonzero(as_tuple=False).squeeze(-1)
+    ft_wrench[start_indices, :-1, :] = ft_wrench[start_indices, 1:, :].clone()
+    ft_wrench[start_indices, -1, :] = ft_wrench[start_indices, -2, :].clone()
+    return ft_wrench
+
+
+def _downsample_ft_wrench(ft_wrench: torch.Tensor, physics_hz: float, ft_log_hz: float) -> torch.Tensor:
+    physics_hz = float(physics_hz)
+    ft_log_hz = float(ft_log_hz)
+    if ft_log_hz <= 0.0:
+        raise ValueError("--ft_log_hz must be positive.")
+    stride = physics_hz / ft_log_hz
+    stride_int = int(round(stride))
+    if abs(stride - stride_int) > 1.0e-6:
+        raise ValueError(f"--ft_log_hz must divide --physics_hz, got {ft_log_hz} vs {physics_hz}.")
+    if stride_int <= 1:
+        return ft_wrench
+    start_idx = stride_int - 1
+    return ft_wrench[:, start_idx::stride_int, :]
+
+
 def _to_torch_bool_mask(dones, device: torch.device) -> torch.Tensor:
     if isinstance(dones, torch.Tensor):
         return dones.to(device=device, dtype=torch.bool)
     return torch.as_tensor(dones, device=device, dtype=torch.bool)
+
+
+def _apply_factory_action_interface_overrides(env_cfg):
+    task_cfg = getattr(env_cfg, "task", None)
+    if task_cfg is None or not hasattr(task_cfg, "disable_action_shaping"):
+        return
+    if args_cli.disable_action_shaping and args_cli.enable_action_shaping:
+        raise ValueError("Pass at most one of --disable_action_shaping or --enable_action_shaping.")
+    if args_cli.disable_action_shaping:
+        task_cfg.disable_action_shaping = True
+        print("[INFO] Action shaping disabled for RL-Games rollout logging.")
+    elif args_cli.enable_action_shaping:
+        task_cfg.disable_action_shaping = False
+        print("[INFO] Action shaping enabled for RL-Games rollout logging.")
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -396,6 +468,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    _apply_factory_action_interface_overrides(env_cfg)
     if args_cli.no_log_images and hasattr(env_cfg, "wrist_camera"):
         env_cfg.wrist_camera = None
     elif args_cli.log_depth and hasattr(env_cfg, "wrist_camera") and env_cfg.wrist_camera is not None:
@@ -457,7 +530,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # keep a direct handle for logging states/images
     base_env = env.unwrapped
     if args_cli.privileged_actor and "Visuomotor-" in args_cli.task and actor_input_dim == 19:
-        _alias_teacher_policy_as_policy(base_env)
+        _alias_teacher_policy_as_policy(base_env, policy_dim_hint=actor_input_dim)
+    if (
+        args_cli.log_path
+        and not args_cli.no_log_images
+        and getattr(base_env, "_wrist_camera", None) is None
+    ):
+        args_cli.no_log_images = True
+        print("[INFO] No wrist camera found for this task. Falling back to state/FT-only logging.")
 
     if args_cli.video:
         video_kwargs = {
@@ -509,13 +589,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         h5_file = h5py.File(args_cli.log_path, "w")
         log_env_ids = _parse_env_ids(args_cli.log_env_ids, base_env.num_envs, base_env.device)
         timestep_in_episode = torch.zeros(base_env.num_envs, dtype=torch.int64, device=base_env.device)
+        episode_rows = {int(env_id): [] for env_id in log_env_ids.detach().cpu().tolist()}
         if args_cli.log_success_only:
-            episode_rows = {int(env_id): [] for env_id in log_env_ids.detach().cpu().tolist()}
             suppress_after_success = torch.zeros(base_env.num_envs, dtype=torch.bool, device=base_env.device)
             pending_success = torch.zeros(base_env.num_envs, dtype=torch.bool, device=base_env.device)
             success_tail_remaining = torch.zeros(base_env.num_envs, dtype=torch.int64, device=base_env.device)
             success_tail_steps = max(int(round(args_cli.success_tail_seconds / dt)), 0)
         pre_action_wait_steps = max(int(round(args_cli.pre_action_wait_seconds / dt)), 0)
+        physics_hz = 1.0 / float(base_env.physics_dt)
+        policy_hz = 1.0 / float(base_env.step_dt)
+        ft_log_hz = float(args_cli.ft_log_hz) if args_cli.ft_log_hz is not None else physics_hz
         rgb_crop_height = 256
         rgb_crop_width = 256
         h5_file.attrs["task"] = args_cli.task
@@ -533,6 +616,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         h5_file.attrs["wrist_rgb_crop"] = "centerbottom_256x256"
         h5_file.attrs["action_scale"] = args_cli.action_scale
         h5_file.attrs["action_scale_z"] = args_cli.action_scale_z
+        h5_file.attrs["physics_hz"] = physics_hz
+        h5_file.attrs["policy_hz"] = policy_hz
+        h5_file.attrs["ft_log_hz"] = ft_log_hz
+        h5_file.attrs["ft_samples_per_policy_step"] = int(round(ft_log_hz / policy_hz))
+        h5_file.attrs["ft_layout"] = "per_policy_step_substeps"
+        h5_file.attrs["ft_wrench_order"] = "fx,fy,fz,tx,ty,tz"
         print(f"[INFO] Vision rollout HDF5 log: {os.path.abspath(args_cli.log_path)}")
         print(f"[INFO] Logging env ids: {h5_file.attrs['logged_env_ids'].tolist()}")
 
@@ -607,6 +696,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         "eef_pos": _tensor_to_numpy(base_env.fingertip_midpoint_pos, log_env_ids, dtype=np.float32),
                         "eef_quat": _tensor_to_numpy(base_env.fingertip_midpoint_quat, log_env_ids, dtype=np.float32),
                     }
+                    if args_cli.log_ft:
+                        left_ft_wrench = getattr(base_env, "left_ft_wrench_substeps", None)
+                        right_ft_wrench = getattr(base_env, "right_ft_wrench_substeps", None)
+                        if left_ft_wrench is None or right_ft_wrench is None:
+                            left_ft_body_idx = getattr(base_env, "left_ft_body_idx", None)
+                            right_ft_body_idx = getattr(base_env, "right_ft_body_idx", None)
+                            if left_ft_body_idx is not None and right_ft_body_idx is not None:
+                                body_wrench = getattr(base_env._robot.data, "body_incoming_joint_wrench_b", None)
+                                if body_wrench is not None:
+                                    left_ft_wrench = body_wrench[:, left_ft_body_idx].unsqueeze(1)
+                                    right_ft_wrench = body_wrench[:, right_ft_body_idx].unsqueeze(1)
+                        if left_ft_wrench is not None and right_ft_wrench is not None:
+                            left_ft_wrench = _drop_startup_ft_substep(left_ft_wrench, timestep_in_episode)
+                            right_ft_wrench = _drop_startup_ft_substep(right_ft_wrench, timestep_in_episode)
+                            left_ft_wrench = _downsample_ft_wrench(left_ft_wrench, physics_hz, ft_log_hz)
+                            right_ft_wrench = _downsample_ft_wrench(right_ft_wrench, physics_hz, ft_log_hz)
+                            batch["left_ft_wrench"] = _tensor_to_numpy(left_ft_wrench, log_env_ids, dtype=np.float32)
+                            batch["right_ft_wrench"] = _tensor_to_numpy(right_ft_wrench, log_env_ids, dtype=np.float32)
                     if not args_cli.no_log_images:
                         if not hasattr(base_env, "_wrist_camera"):
                             raise AttributeError(
@@ -643,9 +750,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                                 _slice_batch_rows(batch, active_mask),
                             )
                     else:
-                        _append_h5_batch(h5_file, batch)
-                        h5_file.flush()
-                        total_samples_written += batch_size
+                        _append_episode_step(episode_rows, env_id_batch, batch)
 
                     timestep_in_episode += 1
                     if args_cli.log_success_only and prev_ep_succeeded is not None:
@@ -703,6 +808,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                                 success_tail_remaining[env_id] = 0
                             suppress_after_success[dones_mask] = False
                             h5_file.flush()
+                        else:
+                            done_env_ids = log_env_ids[dones_mask[log_env_ids]]
+                            for env_id_tensor in done_env_ids:
+                                env_id = int(env_id_tensor.item())
+                                total_samples_written += _flush_episode_rows(
+                                    h5_file, episode_rows[env_id], force_terminal=False
+                                )
+                                episode_rows[env_id].clear()
+                            if len(done_env_ids) > 0:
+                                h5_file.flush()
                         timestep_in_episode[dones_mask] = 0
 
             timestep += 1
@@ -745,6 +860,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if args_cli.real_time and sleep_time > 0:
                 time.sleep(sleep_time)
     finally:
+        if h5_file is not None and episode_rows is not None and not args_cli.log_success_only:
+            for env_id in sorted(episode_rows):
+                total_samples_written += _flush_episode_rows(h5_file, episode_rows[env_id], force_terminal=False)
+                episode_rows[env_id].clear()
+            h5_file.flush()
         if h5_file is not None:
             h5_file.close()
 

@@ -1073,6 +1073,7 @@ class FactoryEnv(DirectRLEnv):
             held_asset_relative_pos = factory_utils.get_held_base_pos_local(
                 self.cfg_task.name, self.cfg_task.fixed_asset_cfg, self.num_envs, self.device
             )
+            held_asset_relative_pos[:, 2] += self.cfg_task.held_asset_grasp_z_offset
         else:
             raise NotImplementedError("Task not implemented")
 

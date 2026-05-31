@@ -122,6 +122,11 @@ class FactoryEnv(DirectRLEnv):
         self.left_finger_body_idx = self._get_body_index("panda_leftfinger", "fr3_leftfinger")
         self.right_finger_body_idx = self._get_body_index("panda_rightfinger", "fr3_rightfinger")
         self.fingertip_body_idx = self._get_body_index("panda_fingertip_centered", "fr3_hand_tcp", "fr3_hand")
+        self.left_ft_body_idx = self._get_body_index("fr3_left_ft_pad", "fr3_left_ft_base", "fr3_left_ft")
+        self.right_ft_body_idx = self._get_body_index("fr3_right_ft_pad", "fr3_right_ft_base", "fr3_right_ft")
+        self.left_ft_wrench_substeps = torch.zeros((self.num_envs, self.cfg.decimation, 6), device=self.device)
+        self.right_ft_wrench_substeps = torch.zeros((self.num_envs, self.cfg.decimation, 6), device=self.device)
+        self.ft_substep_idx = 0
 
         # Tensors for finite-differencing.
         self.last_update_timestamp = 0.0  # Note: This is for finite differencing body velocities.
@@ -290,11 +295,27 @@ class FactoryEnv(DirectRLEnv):
         if len(env_ids) > 0:
             self._reset_buffers(env_ids)
 
+        self.ft_substep_idx = 0
+        self.left_ft_wrench_substeps.zero_()
+        self.right_ft_wrench_substeps.zero_()
         self.actions = self.ema_factor * action.clone().to(self.device) + (1 - self.ema_factor) * self.actions
+
+    def _record_ft_substep(self):
+        """Record one physics-rate FT sample during the decimation loop."""
+        if self.ft_substep_idx >= self.left_ft_wrench_substeps.shape[1]:
+            return
+        self.left_ft_wrench_substeps[:, self.ft_substep_idx] = self._robot.data.body_incoming_joint_wrench_b[
+            :, self.left_ft_body_idx
+        ]
+        self.right_ft_wrench_substeps[:, self.ft_substep_idx] = self._robot.data.body_incoming_joint_wrench_b[
+            :, self.right_ft_body_idx
+        ]
+        self.ft_substep_idx += 1
 
     def close_gripper_in_place(self):
         """Keep gripper in current position as gripper closes."""
         actions = torch.zeros((self.num_envs, 6), device=self.device)
+        grasp_close_width = self.cfg_task.held_asset_cfg.diameter / 2.0 * 0.875
 
         # Interpret actions as target pos displacements and set pos target
         pos_actions = actions[:, 0:3] * self.pos_threshold
@@ -327,7 +348,7 @@ class FactoryEnv(DirectRLEnv):
         self.generate_ctrl_signals(
             ctrl_target_fingertip_midpoint_pos=ctrl_target_fingertip_midpoint_pos,
             ctrl_target_fingertip_midpoint_quat=ctrl_target_fingertip_midpoint_quat,
-            ctrl_target_gripper_dof_pos=0.0,
+            ctrl_target_gripper_dof_pos=grasp_close_width,
         )
 
     def _apply_action(self):
@@ -336,6 +357,8 @@ class FactoryEnv(DirectRLEnv):
         # Check if we need to re-compute velocities within the decimation loop.
         if self.last_update_timestamp < self._robot._data._sim_timestamp:
             self._compute_intermediate_values(dt=self.physics_dt)
+        self._record_ft_substep()
+        grasp_close_width = self.cfg_task.held_asset_cfg.diameter / 2.0 * 0.875
 
         # Interpret actions as target pos displacements and set pos target
         pos_actions = self.actions[:, 0:3] * self.pos_threshold
@@ -378,7 +401,7 @@ class FactoryEnv(DirectRLEnv):
         self.generate_ctrl_signals(
             ctrl_target_fingertip_midpoint_pos=ctrl_target_fingertip_midpoint_pos,
             ctrl_target_fingertip_midpoint_quat=ctrl_target_fingertip_midpoint_quat,
-            ctrl_target_gripper_dof_pos=0.0,
+            ctrl_target_gripper_dof_pos=grasp_close_width,
         )
 
     def generate_ctrl_signals(
@@ -664,6 +687,7 @@ class FactoryEnv(DirectRLEnv):
             held_asset_relative_pos = factory_utils.get_held_base_pos_local(
                 self.cfg_task.name, self.cfg_task.fixed_asset_cfg, self.num_envs, self.device
             )
+            held_asset_relative_pos[:, 2] += self.cfg_task.held_asset_grasp_z_offset
         else:
             raise NotImplementedError("Task not implemented")
 

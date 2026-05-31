@@ -570,8 +570,10 @@ def main():
     extra_plot_paths: list[Path] = []
 
     with h5py.File(h5_path, "r") as h5_file:
-        required = ["done", "wrist_rgb"]
-        if not args.vision:
+        required = ["done"]
+        if args.vision:
+            required.append("wrist_rgb")
+        else:
             required.extend(["left_ft_wrench", "right_ft_wrench"])
         missing = [name for name in required if name not in h5_file]
         if missing:
@@ -600,16 +602,19 @@ def main():
         local_step_end = int(rows.shape[0] - 1)
         demo_step_text = f"policy steps {local_step_start}-{local_step_end}"
 
-        wrist_rgb_raw = np.asarray(h5_file["wrist_rgb"][rows], dtype=np.uint8)
+        has_wrist_rgb = "wrist_rgb" in h5_file
+        wrist_rgb_raw = np.asarray(h5_file["wrist_rgb"][rows], dtype=np.uint8) if has_wrist_rgb else None
         side_view_rgb_raw = None
-        if "side_view_rgb" in h5_file:
+        if has_wrist_rgb and "side_view_rgb" in h5_file:
             side_view_rgb_raw = np.asarray(h5_file["side_view_rgb"][rows], dtype=np.uint8)
         fps = args.fps if args.fps is not None else _default_fps_from_h5(h5_file)
         crop_size = args.img_size if args.img_size is not None else _default_crop_size_from_h5(h5_file)
-        wrist_rgb = wrist_rgb_raw
-        if args.square_wrist:
-            wrist_rgb = _center_square_numpy(wrist_rgb)
-        wrist_rgb = _center_crop_numpy(wrist_rgb, crop_size)
+        wrist_rgb = None
+        if wrist_rgb_raw is not None:
+            wrist_rgb = wrist_rgb_raw
+            if args.square_wrist:
+                wrist_rgb = _center_square_numpy(wrist_rgb)
+            wrist_rgb = _center_crop_numpy(wrist_rgb, crop_size)
         side_view_rgb = None
         if side_view_rgb_raw is not None:
             side_view_rgb = _center_crop_numpy(side_view_rgb_raw, crop_size)
@@ -658,8 +663,12 @@ def main():
             )
         x = np.arange(left_ft.shape[0] if not args.vision else wrist_rgb.shape[0], dtype=np.int64)
 
+    if wrist_rgb_raw is None and not args.no_video:
+        print("[INFO] No wrist_rgb dataset found. Skipping video generation and producing FT/action plots only.")
+        args.no_video = True
+
     wrote_raw_video = False
-    if (not args.no_video) and args.vision and args.res in ("raw", "both"):
+    if (not args.no_video) and args.vision and wrist_rgb_raw is not None and args.res in ("raw", "both"):
         target_path = raw_video_path if args.res == "both" else video_path
         raw_sync_height = args.sync_height if side_view_rgb_raw is not None else None
         with imageio.get_writer(str(target_path), fps=max(fps, 1), macro_block_size=1) as writer:
@@ -672,7 +681,7 @@ def main():
         wrote_raw_video = True
 
     wrote_crop_video = False
-    if (not args.no_video) and args.res in ("crop", "both"):
+    if (not args.no_video) and wrist_rgb is not None and args.res in ("crop", "both"):
         target_path = crop_video_path if args.res == "both" else video_path
         with imageio.get_writer(str(target_path), fps=max(fps, 1), macro_block_size=1) as writer:
             for frame_idx, wrist_frame in enumerate(wrist_rgb):
@@ -759,7 +768,7 @@ def main():
             episode_boundaries=ft_episode_boundaries,
         )
         resized_for_sync = False
-        if not args.no_video:
+        if not args.no_video and wrist_rgb is not None:
             with imageio.get_writer(str(sync_video_path), fps=max(fps, 1), macro_block_size=1) as writer:
                 for frame_idx, wrist_frame in enumerate(wrist_rgb):
                     ft_frame_idx = min((frame_idx + 1) * ft_samples_per_step - 1, left_ft.shape[0] - 1)

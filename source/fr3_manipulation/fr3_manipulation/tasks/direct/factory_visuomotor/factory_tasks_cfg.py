@@ -367,6 +367,7 @@ class NutThread(FactoryTask):
     name = "nut_thread"
     fixed_asset_cfg = BoltM16()
     held_asset_cfg = NutM16()
+    held_asset_grasp_z_offset: float = 0.01
     asset_size = 16.0
     duration_s = 30.0
 

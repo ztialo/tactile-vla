@@ -25,6 +25,8 @@ OBS_DIM_CFG = {
     "ee_angvel": 3,
     "left_ft_wrench": 6,
     "right_ft_wrench": 6,
+    "left_ft_wrench_history": 96,
+    "right_ft_wrench_history": 96,
 }
 
 STATE_DIM_CFG = {
@@ -47,6 +49,8 @@ STATE_DIM_CFG = {
     "rot_threshold": 3,
     "left_ft_wrench": 6,
     "right_ft_wrench": 6,
+    "left_ft_wrench_history": 96,
+    "right_ft_wrench_history": 96,
 }
 
 
@@ -128,6 +132,9 @@ class FactoryEnvCfg(DirectRLEnvCfg):
         "fixed_pos",
         "fixed_quat",
     ]
+    ft_history_len: int = 16
+    ft_ma_window: int = 10
+    negate_ft: bool = True
 
     task_name: str = "peg_insert"  # peg_insert, gear_mesh, nut_thread
     task: FactoryTask = FactoryTask()
@@ -228,3 +235,31 @@ class FactoryTaskNutThreadCfg(FactoryEnvCfg):
     task_name = "nut_thread"
     task = NutThread()
     episode_length_s = 30.0
+
+
+@configclass
+class FactoryTaskNutThreadFtCfg(FactoryTaskNutThreadCfg):
+    obs_order: list = [
+        "fingertip_pos_rel_fixed",
+        "fingertip_quat",
+        "ee_linvel",
+        "ee_angvel",
+        "left_ft_wrench_history",
+        "right_ft_wrench_history",
+    ]
+    state_order: list = [
+        "fingertip_pos",
+        "fingertip_quat",
+        "held_quat_rel_fixed",
+        "fingertip_quat_rel_held",
+        "ee_linvel",
+        "ee_angvel",
+        "joint_pos",
+        "held_pos",
+        "held_pos_rel_fixed",
+        "held_quat",
+        "fixed_pos",
+        "fixed_quat",
+        "left_ft_wrench_history",
+        "right_ft_wrench_history",
+    ]
