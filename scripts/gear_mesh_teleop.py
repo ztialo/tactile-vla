@@ -704,6 +704,8 @@ class FrankaTeleopAttachRuntime:
         self._ft_log_writer = None
         self._ft_log_path: Optional[Path] = None
         self._ft_log_last_write_s = 0.0
+        self._recording_active = False
+        self._warned_waiting_for_record_start = False
         self._ft_link_ids: Optional[dict[str, int]] = None
         self._ft_link_names: Optional[dict[str, str]] = None
         self._warned_ft_joint_force_missing = False
@@ -757,6 +759,8 @@ class FrankaTeleopAttachRuntime:
         self._warned_ft_joint_force_missing = False
         self._printed_ft_joint_resolution = False
         self._ft_log_last_write_s = 0.0
+        self._recording_active = False
+        self._warned_waiting_for_record_start = False
 
     def start(self) -> None:
         _suppress_viewport_notifications()
@@ -805,10 +809,10 @@ class FrankaTeleopAttachRuntime:
             self._on_physics_step
         )
         self._setup_keyboard_debug()
-        self._open_ft_log()
         self._setup_live_ft_plot()
 
         print("[INFO] Attach runtime started.", flush=True)
+        print("[INFO] Press 'R' to start recording and enable arm motion.", flush=True)
         try:
             simulation_context = SimulationContext()
             physics_dt = float(simulation_context.get_physics_dt())
@@ -893,6 +897,15 @@ class FrankaTeleopAttachRuntime:
             self._ft_log_file = None
             self._ft_log_writer = None
             self._ft_log_path = None
+
+    def _start_recording(self) -> None:
+        if self._recording_active:
+            print("[INFO] Recording already active.", flush=True)
+            return
+        self._open_ft_log()
+        self._recording_active = True
+        self._warned_waiting_for_record_start = False
+        print("[INFO] Recording started. ROS /eef_pose control is now enabled.", flush=True)
 
     def _close_ft_log(self) -> None:
         if self._ft_log_file is None:
@@ -1280,6 +1293,8 @@ class FrankaTeleopAttachRuntime:
                     self._step_gripper_target(KEYBOARD_GRIPPER_STEP)
                 elif key_id in ("EQUAL", "="):
                     self._step_gripper_target(-KEYBOARD_GRIPPER_STEP)
+                elif key_id == "R":
+                    self._start_recording()
         except Exception as exc:
             print(f"[WARN] Keyboard event handling failed: {exc}", flush=True)
         return True
@@ -2176,6 +2191,23 @@ class FrankaTeleopAttachRuntime:
             return
 
         self._update_gripper_smooth(dt)
+
+        if not self._recording_active:
+            if not self._ensure_home_command_pose():
+                return
+            if not self._warned_waiting_for_record_start:
+                print("[INFO] Waiting for recording start. Press 'R' to enable /eef_pose arm control.", flush=True)
+                self._warned_waiting_for_record_start = True
+            target_position_np = np.asarray(self._home_cmd_position, dtype=np.float64)
+            target_orientation_np = np.asarray(self._home_cmd_orientation, dtype=np.float64)
+            self._set_target_world_pose(target_position_np, target_orientation_np)
+            target_ori_arg = target_orientation_np if SEND_ORIENTATION_TARGET else None
+            actions = self._controller.forward(
+                target_end_effector_position=target_position_np,
+                target_end_effector_orientation=target_ori_arg,
+            )
+            self._articulation_controller.apply_action(actions)
+            return
 
         keyboard_target = self._keyboard_target_position
         keyboard_orientation = self._keyboard_target_orientation

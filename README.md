@@ -17,17 +17,9 @@ python scripts/train.py \
 # evaluate visuotactile:
 ```bash
 export PYTHONPATH=$PYTHONPATH:$PWD/third_party:$PWD/third_party/multimodal_representation/multimodal:$PWD
-
-python scripts/assess_diffusion.py \
-  --checkpoint logs/diffusion/gear_mesh_visuotactile_timm_ft/2026.05.28-01.31.57/checkpoints/epoch=0045-val_loss=0.0367.ckpt \
-  --task Visuotactile-Factory-GearMesh-Direct-v0 \
-  --fixed_asset_height \
-  --num_loops 3 \
-  --side_view_grid_9
-```
-May need: 
-```bash
 export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6:/lib/x86_64-linux-gnu/libgcc_s.so.1
+
+python scripts/assess_diffusion.py   --checkpoint logs/diffusion/gear_mesh_visuotactile_timm_ft/2026.05.31-09.47.24_gear_mesh_visuotactile/checkpoints/epoch=0105-val_loss=0.0256.ckpt   --task Visuotactile-Factory-GearMesh-Direct-v0   --fixed_asset_height   --num_loops 3   --side_view_grid_9   --ft   --fixed_eef_init   --max_action_plan_steps 4   env.task.hand_init_pos='[0.0, 0.0, 0.15]'
 ```
 
 ## Finetune teacher approach z vel 
